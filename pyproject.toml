@@ -1,0 +1,17 @@
+[project]
+name = "payment-initiator"
+version = "0.1.0"
+description = "Iniciadora de pagamento Open Finance (PISP v5 redirect) em Python/FastAPI"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "httpx>=0.27.0",
+    "pydantic>=2.8.0",
+    "pydantic-settings>=2.4.0",
+    "sqlmodel>=0.0.22",
+    "python-dotenv>=1.0.1",
+]
+
+[tool.uv]
+package = false

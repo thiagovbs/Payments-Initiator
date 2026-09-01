@@ -1,0 +1,353 @@
+openapi: 3.0.3
+info:
+  title: "PISP Initiator API (Open Finance v5)"
+  description: >
+    API exposta pela Iniciadora (PISP) e intermediada pelo Sensedia APIM como
+    PROXY PURO. Mantém os paths Open Finance formais (PISP v5) e repassa para
+    os paths equivalentes do core-banking (detentora) sem tradução de
+    vocabulário: /open-banking/pisp/payments/v5/consents ->
+    /v1/aspsp/payments/consents; /v5/pix/payments -> /v1/aspsp/payments;
+    /v5/pix/payments/{id} -> /v1/aspsp/payments/{id}.
+    Também expõe proxy dos paths de autenticação e contas do core.
+  version: "1.0.0"
+servers:
+  - url: "https://api-assets.sensedia.com/v1"
+    description: "APIM Sensedia"
+tags:
+  - name: "PISP"
+    description: "Iniciação de Pagamento"
+paths:
+  /open-banking/auth/authorize:
+    post:
+      tags: [Auth]
+      summary: "Proxy: inicia o fluxo OAuth da detentora"
+      operationId: "proxyAuthAuthorize"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                redirect_uri:
+                  type: string
+              required: [redirect_uri]
+      responses:
+        "200":
+          description: "Auth request criado"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  request_id:
+                    type: string
+                  login_url:
+                    type: string
+      x-destination: "https://banking-api-production-ecfd.up.railway.app/v1/auth/authorize"
+      x-api-broken: false
+      x-interceptors: {}
+
+  /open-banking/auth/token:
+    post:
+      tags: [Auth]
+      summary: "Proxy: troca code por access_token"
+      operationId: "proxyAuthToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                code:
+                  type: string
+              required: [code]
+      responses:
+        "200":
+          description: "Token emitido"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token:
+                    type: string
+      x-destination: "https://banking-api-production-ecfd.up.railway.app/v1/auth/token"
+      x-api-broken: false
+      x-interceptors: {}
+
+  /open-banking/accounts:
+    get:
+      tags: [Accounts]
+      summary: "Proxy: lista contas do usuário autenticado"
+      operationId: "proxyListAccounts"
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: "Lista de contas"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+      x-destination: "https://banking-api-production-ecfd.up.railway.app/v1/me/accounts"
+      x-api-broken: false
+      x-interceptors: {}
+
+  /open-banking/pisp/payments/v5/consents:
+    post:
+      tags: [PISP]
+      summary: "Cria um consentimento de pagamento PIX (PISP v5)"
+      operationId: "createPispV5Consent"
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PispV5ConsentRequest"
+      responses:
+        "201":
+          description: "Consentimento criado"
+          headers:
+            x-pisp-consent-id:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConsentCreatedResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+      x-destination: "https://banking-api-production-ecfd.up.railway.app/v1/aspsp/payments/consents"
+      x-api-broken: false
+      x-interceptors: {}
+
+  /open-banking/pisp/payments/v5/pix/payments:
+    post:
+      tags: [PISP]
+      summary: "Inicia o pagamento PIX após autorização"
+      operationId: "initiatePispV5Payment"
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                consentId:
+                  type: string
+                endToEndIds:
+                  type: array
+                  items:
+                    type: string
+              required: [consentId]
+      responses:
+        "201":
+          description: "Pagamento iniciado"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentInitiatedResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+      x-destination: "https://banking-api-production-ecfd.up.railway.app/v1/aspsp/payments"
+      x-api-broken: false
+      x-interceptors: {}
+
+  /open-banking/pisp/payments/v5/pix/payments/{paymentId}:
+    get:
+      tags: [PISP]
+      summary: "Consulta o status de um pagamento PIX"
+      operationId: "getPispV5PaymentStatus"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: paymentId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "Status do pagamento"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentStatusResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      x-destination: "https://banking-api-production-ecfd.up.railway.app/v1/aspsp/payments/{paymentId}"
+      x-api-broken: false
+      x-interceptors: {}
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    PispV5ConsentRequest:
+      type: object
+      properties:
+        redirect_uri:
+          type: string
+          nullable: true
+        authorisation_server:
+          type: object
+          properties:
+            authorisation_server_id:
+              type: string
+            organisation_id:
+              type: string
+        creditor:
+          type: object
+          properties:
+            person_type:
+              type: string
+              enum: [PESSOA_NATURAL, PESSOA_JURIDICA]
+            cpf_cnpj:
+              type: string
+            name:
+              type: string
+        payment:
+          type: object
+          properties:
+            type:
+              type: string
+              default: PIX
+            purpose:
+              type: string
+              enum: [IMMEDIATE]
+            date:
+              type: string
+              format: date
+            currency:
+              type: string
+              default: BRL
+            amount:
+              type: string
+            details:
+              type: object
+              properties:
+                local_instrument:
+                  type: string
+                  default: DICT
+                proxy:
+                  type: string
+                creditor_account:
+                  type: object
+                  properties:
+                    ispb:
+                      type: string
+                    issuer:
+                      type: string
+                    number:
+                      type: string
+                    account_type:
+                      type: string
+        debtor_account:
+          type: object
+          properties:
+            ispb:
+              type: string
+            issuer:
+              type: string
+            number:
+              type: string
+            account_type:
+              type: string
+        remittance_information:
+          type: string
+      required: [creditor, payment, debtor_account]
+
+    ConsentCreatedResponse:
+      type: object
+      properties:
+        consent_id:
+          type: string
+        redirect_uri:
+          type: string
+        request_id:
+          type: string
+
+    PaymentInitiatedResponse:
+      type: object
+      properties:
+        payment_id:
+          type: string
+        consent_id:
+          type: string
+        end_to_end_id:
+          type: string
+        status:
+          type: string
+        amount:
+          type: string
+        balance:
+          type: string
+
+    PaymentStatusResponse:
+      type: object
+      properties:
+        consent_id:
+          type: string
+        status:
+          type: string
+        payment_id:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+  responses:
+    BadRequest:
+      description: "Requisição inválida"
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+              message:
+                type: string
+    Unauthorized:
+      description: "Não autenticado"
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+              message:
+                type: string
+    NotFound:
+      description: "Não encontrado"
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+              message:
+                type: string
