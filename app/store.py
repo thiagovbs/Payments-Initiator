@@ -23,6 +23,21 @@ class ConsentRecord(SQLModel, table=True):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class DeviceRecord(SQLModel, table=True):
+    """Dispositivo vinculado (JSR/ITP) à detentora via FIDO2.
+
+    Um dispositivo registrado habilita as jornadas JSR (pagamento sem redirect).
+    """
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    enrollment_id: str = Field(index=True, unique=True)
+    credential_id: str = Field(index=True, unique=True)
+    username: str = ""
+    account_id: str = ""
+    status: str = "PENDING"  # PENDING | REGISTERED
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 def init_db() -> None:
     SQLModel.metadata.create_all(engine)
 
@@ -73,4 +88,58 @@ def get_by_payment_id(payment_id: str) -> Optional[ConsentRecord]:
     with Session(engine) as session:
         return session.exec(
             select(ConsentRecord).where(ConsentRecord.payment_id == payment_id)
+        ).first()
+
+
+# ---------------------------------------------------------------------------
+# Devices (JSR/ITP) — dispositivos vinculados via FIDO2
+# ---------------------------------------------------------------------------
+
+
+def upsert_device(record: DeviceRecord) -> DeviceRecord:
+    """Insere ou atualiza um dispositivo (por enrollment_id ou credential_id)."""
+    with Session(engine) as session:
+        existing = session.exec(
+            select(DeviceRecord).where(
+                DeviceRecord.enrollment_id == record.enrollment_id
+            )
+        ).first()
+        if not existing and record.credential_id:
+            existing = session.exec(
+                select(DeviceRecord).where(
+                    DeviceRecord.credential_id == record.credential_id
+                )
+            ).first()
+        if existing:
+            existing.credential_id = record.credential_id
+            existing.username = record.username
+            existing.account_id = record.account_id
+            existing.status = record.status
+            session.add(existing)
+            session.commit()
+            session.refresh(existing)
+            return existing
+        session.add(record)
+        session.commit()
+        session.refresh(record)
+        return record
+
+
+def get_active_device() -> Optional[DeviceRecord]:
+    """Retorna o dispositivo REGISTERED mais recente, se houver."""
+    with Session(engine) as session:
+        statement = (
+            select(DeviceRecord)
+            .where(DeviceRecord.status == "REGISTERED")
+            .order_by(DeviceRecord.created_at.desc())
+        )
+        return session.exec(statement).first()
+
+
+def get_device_by_enrollment_id(
+    enrollment_id: str,
+) -> Optional[DeviceRecord]:
+    with Session(engine) as session:
+        return session.exec(
+            select(DeviceRecord).where(DeviceRecord.enrollment_id == enrollment_id)
         ).first()

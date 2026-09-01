@@ -5,6 +5,7 @@ Em produção, chama via gateway proxy Sensedia (paths /open-banking/...).
 """
 
 import uuid
+import urllib.parse
 
 import httpx
 
@@ -52,6 +53,11 @@ class CoreBankingService:
         if self.use_proxy:
             return f"{self.base_url}/{settings.pisp_path}/payments/v5/pix/payments/{payment_id}"
         return f"{self.base_url}/v1/aspsp/payments/{payment_id}"
+
+    def _js_path(self, suffix: str) -> str:
+        # Os endpoints JSR (ITP + PISP) usam os paths /open-banking/... tanto
+        # em dev (core expõe diretamente) quanto em prod (via gateway proxy).
+        return f"{self.base_url}{suffix}"
 
     # -- Headers -----------------------------------------------------------
 
@@ -207,3 +213,120 @@ class CoreBankingService:
             },
             "description": payload.get("description", "Pagamento via Open Finance"),
         }
+
+    # ------------------------------------------------------------------
+    # Jornada JSR (FIDO2 simplificado) — ITP enrollment + PISP JSR
+    # ------------------------------------------------------------------
+
+    def _initiator_headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if settings.initiator_client_secret:
+            headers["x-initiator-key"] = settings.initiator_client_secret
+        return headers
+
+    def create_js_enrollment(self, redirect_uri: str) -> dict:
+        url = self._js_path("/open-banking/itp/v2/enrollments")
+        body = {"redirect_uri": redirect_uri}
+        with httpx.Client(timeout=30.0) as client:
+            resp = client.post(url, json=body, headers=self._initiator_headers())
+            resp.raise_for_status()
+        return {
+            "enrollment_id": resp.headers.get("x-itp-enrollment-id", ""),
+            "redirect_uri": resp.json().get("redirect_uri", ""),
+            "request_id": resp.json().get("request_id", ""),
+            "fido_registration_options": resp.json().get("fidoRegistrationOptions", {}),
+        }
+
+    def account_holder_confirmed_js(
+        self, enrollment_id: str, username: str, account_number: str = ""
+    ) -> dict:
+        """Confirma o titular do enrollment (JSR/ITP) e colhe code+state.
+
+        Faz PATCH em /enrollment-supports/v2/.../account-holder-confirmed. A
+        detentora responde com um header ``Location`` apontando para o nosso
+        próprio callback com ``code`` e ``state`` — basta extraí-los da URL
+        (não seguimos o redirect, pois isso recursaria no /callback).
+        """
+        url = self._js_path(
+            "/open-banking/enrollment-supports/v2/"
+            f"enrollment-supports/{enrollment_id}/account-holder-confirmed"
+        )
+        body = {
+            "data": {
+                "transactionLimit": "40.00",
+                "dailyLimit": "1000.00",
+                "debtorAccount": {
+                    "number": account_number,
+                    "accountType": "CACC",
+                    "ibgeTownCode": "1234567",
+                },
+                "fidoUser": {"name": username, "displayName": username},
+            }
+        }
+        with httpx.Client(timeout=30.0) as client:
+            resp = client.patch(url, json=body, headers=self._initiator_headers())
+            resp.raise_for_status()
+        location = resp.headers.get("location", "")
+        parsed = urllib.parse.urlsplit(location)
+        query = urllib.parse.parse_qs(parsed.query)
+        return {
+            "authorization_code": query.get("code", [""])[0],
+            "request_id": query.get("state", [""])[0],
+        }
+
+    def confirm_js_enrollment(
+        self, enrollment_id: str, authorization_code: str, request_id: str
+    ) -> dict:
+        url = self._js_path("/open-banking/itp/v2/enrollments/confirmations")
+        body = {"authorizationCode": authorization_code, "requestId": request_id}
+        with httpx.Client(timeout=30.0) as client:
+            resp = client.post(url, json=body, headers=self._initiator_headers())
+            resp.raise_for_status()
+        return resp.json()
+
+    def register_js_fido(self, enrollment_id: str, fido_response: dict) -> None:
+        url = self._js_path(
+            f"/open-banking/itp/v2/enrollments/{enrollment_id}/fido-registration"
+        )
+        with httpx.Client(timeout=30.0) as client:
+            resp = client.post(
+                url, json=fido_response, headers=self._initiator_headers()
+            )
+            resp.raise_for_status()
+
+    def create_js_consent(self, payload: dict) -> dict:
+        url = self._js_path("/open-banking/pisp/payments/v5/jsr/consents")
+        with httpx.Client(timeout=30.0) as client:
+            resp = client.post(url, json=payload, headers=self._initiator_headers())
+            resp.raise_for_status()
+        data = resp.json()
+        return {
+            "consent_id": resp.headers.get(
+                "x-pisp-consent-id", data.get("consentId", "")
+            ),
+            "fido_challenge": data.get("fidoChallenge", ""),
+        }
+
+    def authorise_js_consent(
+        self, consent_id: str, credential_id: str, challenge: str | None = None
+    ) -> None:
+        url = self._js_path(f"/open-banking/itp/v2/consents/{consent_id}/authorise")
+        body = {"credentialId": credential_id}
+        if challenge:
+            body["challenge"] = challenge
+        headers = {**self._initiator_headers(), "x-bcb-nfc": "true"}
+        with httpx.Client(timeout=30.0) as client:
+            resp = client.post(url, json=body, headers=headers)
+            resp.raise_for_status()
+
+    def initiate_js_payment(self, consent_id: str) -> dict:
+        url = self._js_path("/open-banking/pisp/payments/v5/jsr/pix/payments")
+        body = {
+            "consentId": consent_id,
+            "authorisationFlow": "FIDO_FLOW",
+            "endToEndIds": [_uuid().replace("-", "")],
+        }
+        with httpx.Client(timeout=30.0) as client:
+            resp = client.post(url, json=body, headers=self._initiator_headers())
+            resp.raise_for_status()
+        return {"payment_id": resp.json().get("paymentId", "")}
