@@ -1,0 +1,15 @@
+.venv
+.git
+.gitignore
+.env
+.env.example
+initiator.db
+*.sqlite3
+__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+.ruff_cache
+.mypy_cache
+*.openapi.yaml
+README.md

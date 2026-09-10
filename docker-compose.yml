@@ -1,0 +1,31 @@
+services:
+  app:
+    build: .
+    container_name: payment-initiator
+    restart: unless-stopped
+    # Carrega as variáveis do .env local (INITIATOR_CLIENT_SECRET, CALLBACK_URL,
+    # etc.). Dentro do container, ajuste CORE_BASE_URL/USE_PROXY conforme o
+    # ambiente (ex.: apontar para o host do core na mesma rede, não localhost).
+    env_file:
+      - .env
+    environment:
+      # Overrides úteis quando o .env usa valores voltados para localhost.
+      # Descomente/ajuste conforme o seu ambiente:
+      # CORE_BASE_URL: "http://host.docker.internal:3000"   # core no host
+      # USE_PROXY: "false"
+      PORT: "8100"
+    volumes:
+      # Persiste o banco SQLite (consentimentos e dispositivos vinculados).
+      # O engine cria o arquivo initiator.db no diretório de trabalho (/app).
+      - initiator-data:/app
+    ports:
+      - "3200:8100"
+    networks:
+      - default
+
+volumes:
+  initiator-data:
+
+networks:
+  default:
+    driver: bridge
