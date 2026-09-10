@@ -12,18 +12,10 @@ class Settings(BaseSettings):
     initiator_client_id: str = ""
     initiator_client_secret: str = ""
 
-    # Em desenvolvimento: URL do core-banking (chamada direta, paths /v1/...)
+    # URL do core-banking (chamada direta)
     core_base_url: str = "http://localhost:3000"
-    # Em produção: URL do gateway proxy Sensedia (paths /open-banking/...)
-    gateway_base_url: str = ""
-    # True = usa o gateway (produção) | False = chama o core direto (dev)
-    use_proxy: bool = False
 
     callback_url: str = "http://localhost:8100/callback"
-
-    # Paths formais Open Finance (usados em produção via gateway)
-    pisp_path: str = "open-banking/pisp"
-    aspsp_path: str = "open-banking/journey-aspsp"
 
     organisation_id: str = ""
     authorisation_server_id: str = ""

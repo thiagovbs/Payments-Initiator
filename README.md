@@ -40,12 +40,8 @@ cp .env.example .env
 |---|---|---|
 | `INITIATOR_CLIENT_ID` | Client ID da iniciadora (produção) | — |
 | `INITIATOR_CLIENT_SECRET` | Secret da iniciadora; **deve igualar `INITIATOR_SERVICE_SECRET` do core** (header `x-initiator-key`) | `initiator-dev-secret` |
-| `CORE_BASE_URL` | URL do core-banking (dev, paths `/v1/...`) | `http://localhost:3000` |
-| `GATEWAY_BASE_URL` | URL do gateway Sensedia (produção, paths `/open-banking/...`) | — |
-| `USE_PROXY` | `false` = core direto (dev) · `true` = via gateway (produção) | `false` |
+| `CORE_BASE_URL` | URL do core-banking (chamada direta) | `http://localhost:3000` |
 | `CALLBACK_URL` | URL pública desta iniciadora para receber o redirect da detentora | `http://localhost:8100/callback` |
-| `PISP_PATH` | Path base PISP (produção) | `open-banking/pisp` |
-| `ASPSP_PATH` | Path base ASPSP (produção) | `open-banking/journey-aspsp` |
 | `ORGANISATION_ID` | Organização (produção) | — |
 | `AUTHORISATION_SERVER_ID` | Servidor de autorização (produção) | — |
 | `PORT` | Porta do servidor FastAPI | `8100` |
@@ -76,12 +72,9 @@ A API sobe em `http://localhost:8100`.
 
 > Obs.: a iniciadora cria o arquivo `initiator.db` (SQLite) no diretório de trabalho para persistir consentimentos e dispositivos.
 
-## Modo de operação (dev × produção)
+## Comunicação com o core-banking
 
-A iniciadora decide o backend de destino pela flag `USE_PROXY`:
-
-- **`USE_PROXY=false` (dev)**: chama o core-banking **direto** em `CORE_BASE_URL`, usando os paths `/v1/...` do core (auth, contas, consents ASPSP, rotas JSR `/open-banking/...`).
-- **`USE_PROXY=true` (produção)**: chama o **gateway Sensedia** em `GATEWAY_BASE_URL`, usando os paths formais Open Finance (`PISP_PATH`, `ASPSP_PATH`).
+A iniciadora chama o core-banking **diretamente** em `CORE_BASE_URL`, usando os paths `/v1/...` (auth, contas, consents ASPSP) e `/open-banking/...` (rotas JSR). Os paths são idênticos em qualquer ambiente.
 
 Nas chamadas às rotas JSR do core, a iniciadora envia o header `x-initiator-key` com o valor de `INITIATOR_CLIENT_SECRET`.
 
@@ -143,5 +136,5 @@ O dispositivo `REGISTERED` é o que habilita a jornada JSR (pagamento sem redire
 ## Considerações
 
 - Esta é uma **demo educacional/técnica**: o FIDO é simplificado (mock) e a validação criptográfica WebAuthn não é realizada.
-- Em produção, o tráfego passa pelo **API Gateway Sensedia**, responsável por autenticação, transformação e roteamento — a iniciadora então usa os paths formais Open Finance (`USE_PROXY=true`).
+- A iniciadora comunica-se diretamente com o core-banking em `CORE_BASE_URL`; eventuais camadas de gateway/roteamento ficam transparentes para a aplicação.
 - O `INITIATOR_CLIENT_SECRET` deve ser tratado como segredo e nunca versionado.

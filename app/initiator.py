@@ -20,43 +20,28 @@ class CoreBankingService:
     """Encapsula as chamadas ao core-banking (OAuth + ASPSP + accounts)."""
 
     def __init__(self) -> None:
-        self.use_proxy = settings.use_proxy
-        self.base_url = (
-            settings.gateway_base_url.rstrip("/")
-            if self.use_proxy
-            else settings.core_base_url.rstrip("/")
-        )
+        self.base_url = settings.core_base_url.rstrip("/")
 
     # -- Helpers de construção de URL --------------------------------------
 
     def _auth_path(self, suffix: str) -> str:
-        if self.use_proxy:
-            return f"{self.base_url}/open-banking/auth{suffix}"
         return f"{self.base_url}/v1/auth{suffix}"
 
     def _accounts_path(self) -> str:
-        if self.use_proxy:
-            return f"{self.base_url}/open-banking/accounts"
         return f"{self.base_url}/v1/me/accounts"
 
     def _consents_path(self) -> str:
-        if self.use_proxy:
-            return f"{self.base_url}/{settings.pisp_path}/payments/v5/consents"
         return f"{self.base_url}/v1/aspsp/payments/consents"
 
     def _payments_path(self) -> str:
-        if self.use_proxy:
-            return f"{self.base_url}/{settings.pisp_path}/payments/v5/pix/payments"
         return f"{self.base_url}/v1/aspsp/payments"
 
     def _payment_status_path(self, payment_id: str) -> str:
-        if self.use_proxy:
-            return f"{self.base_url}/{settings.pisp_path}/payments/v5/pix/payments/{payment_id}"
         return f"{self.base_url}/v1/aspsp/payments/{payment_id}"
 
     def _js_path(self, suffix: str) -> str:
-        # Os endpoints JSR (ITP + PISP) usam os paths /open-banking/... tanto
-        # em dev (core expõe diretamente) quanto em prod (via gateway proxy).
+        # Os endpoints JSR (ITP + PISP) usam os paths /open-banking/... expostos
+        # diretamente pelo core-banking.
         return f"{self.base_url}{suffix}"
 
     # -- Headers -----------------------------------------------------------
@@ -161,47 +146,7 @@ class CoreBankingService:
     # -- Montagem do payload de consentimento -------------------------------
 
     def _build_consent_body(self, payload: dict) -> dict:
-        """Monta o body do consentimento conforme o modo (dev/prod)."""
-        if self.use_proxy:
-            # Vocabulary Open Finance formal (PISP v5)
-            return {
-                "redirect_uri": settings.callback_url,
-                "authorisation_server": {
-                    "authorisation_server_id": settings.authorisation_server_id,
-                    "organisation_id": settings.organisation_id,
-                },
-                "creditor": {
-                    "person_type": "PESSOA_NATURAL",
-                    "cpf_cnpj": payload["creditor_cpf_cnpj"],
-                    "name": payload["creditor_name"],
-                },
-                "payment": {
-                    "type": "PIX",
-                    "purpose": "IMMEDIATE",
-                    "date": "2026-12-22",
-                    "currency": payload.get("currency", "BRL"),
-                    "amount": payload["amount"],
-                    "details": {
-                        "local_instrument": "DICT",
-                        "proxy": payload["creditor_key"]["value"],
-                        "creditor_account": {
-                            "ispb": "00000000",
-                            "issuer": "0001",
-                            "number": payload["creditor_key"]["value"],
-                            "account_type": "CACC",
-                        },
-                    },
-                },
-                "debtor_account": {
-                    "ispb": "00000000",
-                    "issuer": "0001",
-                    "number": payload.get("debtor_account_number", ""),
-                    "account_type": "CACC",
-                },
-                "remittance_information": "Pagamento via Open Finance",
-            }
-
-        # Formato do core (dev): /v1/aspsp/payments/consents
+        """Monta o body do consentimento no formato do core-banking."""
         return {
             "accountId": payload["account_id"],
             "amount": payload["amount"],
