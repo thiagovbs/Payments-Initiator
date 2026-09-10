@@ -281,13 +281,22 @@ def _complete_enrollment(record: ConsentRecord, payload: dict, jwt: str) -> dict
     """Finaliza o cadastro do dispositivo (JSR/ITP) e persiste o DeviceRecord."""
     enrollment_id = record.consent_id
     claims = _decode_jwt_claims(jwt)
+    # O titular deve ser o USUÁRIO AUTENTICADO (identidade do JWT), não um valor
+    # arbitrário digitado no POST /enrollments nem o fallback "Cooperado".
     username = (
-        payload.get("username")
-        or claims.get("username")
+        claims.get("username")
         or claims.get("name")
+        or payload.get("username")
         or "Cooperado"
     )
     account_number = payload.get("account_number", "")
+
+    # Quando o número da conta não for informado no payload, resolve a conta de
+    # débito real do usuário autenticado para vincular o enrollment ao titular.
+    if not account_number:
+        accounts = _service.list_accounts(jwt)
+        if accounts:
+            account_number = accounts[0].get("accountNumber", "") or ""
 
     # 1. Confirma o titular e obtém code+state do enrollment
     confirmed = _service.account_holder_confirmed_js(
