@@ -15,10 +15,10 @@ from .initiator import CoreBankingService
 from .store import (
     ConsentRecord,
     DeviceRecord,
-    get_active_device,
     get_by_consent_id,
     get_by_payment_id,
     get_by_request_id,
+    get_device_by_enrollment_id,
     init_db,
     upsert_consent,
     upsert_device,
@@ -86,24 +86,34 @@ class JsrPaymentRequest(BaseModel):
     creditor_name: str
     creditor_cpf_cnpj: str
     creditor_key: dict = Field(..., description="{type, value} da chave PIX do credor")
+    enrollment_id: str = Field(
+        ...,
+        description="Dispositivo vinculado que autoriza o pagamento. "
+        "Devolvido por POST /enrollments e pelo GET /callback do cadastro.",
+    )
 
 
 @app.post("/payments/jsr", status_code=201, response_model=None)
 def create_jsr_payment(req: JsrPaymentRequest):
-    """Inicia um pagamento JSR (sem redirect) usando o dispositivo vinculado.
+    """Inicia um pagamento JSR (sem redirect) com o dispositivo informado.
 
-    Exige um DeviceRecord REGISTERED. Caso contrário, devolve ``need_enrollment``
-    com o ``login_url`` para o cliente cadastrar o dispositivo primeiro.
+    O ``enrollment_id`` é obrigatório e identifica de quem é o pagamento. Antes,
+    usava-se o dispositivo REGISTERED mais recente, sem escopo de titular: com
+    mais de um titular cadastrado, o pagamento de um saía da conta do outro.
     """
-    device = get_active_device()
-    if not device:
+    device = get_device_by_enrollment_id(req.enrollment_id)
+    if not device or device.status != "REGISTERED":
         auth = _service.create_auth_request(settings.callback_url)
         return JSONResponse(
-            status_code=400,
+            status_code=404 if not device else 409,
             content={
                 "need_enrollment": True,
                 "login_url": auth["login_url"],
-                "message": "Nenhum dispositivo vinculado. Cadastre-o antes.",
+                "message": (
+                    "Dispositivo não encontrado. Cadastre-o antes."
+                    if not device
+                    else f"Dispositivo está {device.status}, não REGISTERED."
+                ),
             },
         )
 

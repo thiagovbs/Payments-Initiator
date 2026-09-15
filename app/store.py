@@ -140,17 +140,6 @@ def upsert_device(record: DeviceRecord) -> DeviceRecord:
         return record
 
 
-def get_active_device() -> Optional[DeviceRecord]:
-    """Retorna o dispositivo REGISTERED mais recente, se houver."""
-    with Session(engine) as session:
-        statement = (
-            select(DeviceRecord)
-            .where(DeviceRecord.status == "REGISTERED")
-            .order_by(DeviceRecord.created_at.desc())
-        )
-        return session.exec(statement).first()
-
-
 def get_device_by_enrollment_id(
     enrollment_id: str,
 ) -> Optional[DeviceRecord]:

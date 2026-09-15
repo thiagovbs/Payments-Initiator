@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Minimal Iniciadora
-  description: "API exposta pela Iniciadora (PISP) e intermediada pelo Sensedia APIM. Expõe os endpoints nativos da iniciadora — iniciação de pagamento com redirect (PISP v5) e jornadas JSR (cadastro de dispositivo + pagamento sem redirect) — além dos paths formais Open Finance de autenticação, contas e consentimentos.\nJornada JSR:\n  - POST /enrollments inicia o cadastro do dispositivo (ITP).\n  - GET /callback recebe o redirect da detentora e conclui o cadastro\n    (gera credential_id e vincula a conta).\n  - POST /payments/jsr inicia um pagamento PIX sem redirect usando o\n    dispositivo vinculado (exige device REGISTERED; caso contrário\n    retorna need_enrollment com o login_url).\n"
+  description: "API exposta pela Iniciadora (PISP) e intermediada pelo Sensedia APIM. Expõe os endpoints nativos da iniciadora — iniciação de pagamento com redirect (PISP v5) e jornadas JSR (cadastro de dispositivo + pagamento sem redirect) — além dos paths formais Open Finance de autenticação, contas e consentimentos.\nJornada JSR:\n  - POST /enrollments inicia o cadastro do dispositivo (ITP).\n  - GET /callback recebe o redirect da detentora e conclui o cadastro\n    (gera credential_id e vincula a conta).\n  - POST /payments/jsr inicia um pagamento PIX sem redirect usando o\n    dispositivo indicado em enrollment_id (exige device REGISTERED; caso contrário\n    retorna need_enrollment com o login_url).\n"
   version: 1.1.0
 servers:
 - url: https://api-assets.sensedia.com/v1
@@ -222,11 +222,18 @@ components:
           required:
           - type
           - value
+        enrollment_id:
+          type: string
+          description: >-
+            Dispositivo vinculado que autoriza o pagamento. Devolvido por POST
+            /enrollments e pelo GET /callback do cadastro. Define de qual conta
+            o pagamento sai.
       required:
       - amount
       - creditor_name
       - creditor_cpf_cnpj
       - creditor_key
+      - enrollment_id
     JsrPaymentResponse:
       type: object
       properties:

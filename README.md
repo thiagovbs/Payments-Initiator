@@ -98,7 +98,7 @@ Nas chamadas às rotas JSR do core, a iniciadora envia o header `x-initiator-key
 | GET | `/payments/{identifier}` | Consulta status de um pagamento (por `payment_id` ou `consent_id`) |
 | POST | `/enrollments` | Inicia o cadastro de dispositivo (JSR/ITP) na detentora |
 | GET | `/callback` | Recebe o redirect da detentora e conclui o fluxo (enrollment ou pagamento) |
-| POST | `/payments/jsr` | Inicia pagamento PIX sem redirect (JSR) usando o dispositivo vinculado |
+| POST | `/payments/jsr` | Inicia pagamento PIX sem redirect (JSR) com o dispositivo indicado em `enrollment_id` |
 
 ### Proxy dos paths formais Open Finance
 
@@ -132,7 +132,10 @@ Nas chamadas às rotas JSR do core, a iniciadora envia o header `x-initiator-key
 
 **Pagamento JSR:**
 
-1. `POST /payments/jsr` com os dados do crédito.
+1. `POST /payments/jsr` com os dados do crédito e o `enrollment_id` do
+   dispositivo que autoriza o pagamento — é ele que define de qual conta o
+   pagamento sai. O valor vem de `POST /enrollments` e do `GET /callback` do
+   cadastro.
 2. Se houver um dispositivo `REGISTERED`, cria o consentimento JSR, autoriza com a credencial FIDO e inicia o PIX → retorna `payment_id`.
 3. Se **não** houver dispositivo, retorna `HTTP 400` com `need_enrollment: true` e o `login_url` para cadastro.
 
