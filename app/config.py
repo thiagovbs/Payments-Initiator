@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     organisation_id: str = ""
     authorisation_server_id: str = ""
 
+    # Banco local. Fica num subdiretorio proprio para que o volume do Docker
+    # persista apenas os dados, sem montar por cima do codigo da aplicacao.
+    database_url: str = "sqlite:///./data/initiator.db"
+
     port: int = 8100
 
     model_config = SettingsConfigDict(

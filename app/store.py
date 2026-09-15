@@ -1,13 +1,28 @@
 """Persistência simples (SQLite) do estado dos consentimentos da Iniciadora."""
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
-DB_URL = "sqlite:///./initiator.db"
+from .config import settings
 
-engine = create_engine(DB_URL, connect_args={"check_same_thread": False})
+SQLITE_PREFIX = "sqlite:///"
+
+
+def _ensure_sqlite_directory(url: str) -> None:
+    """Cria o diretorio do arquivo SQLite, que o proprio engine nao cria."""
+    if not url.startswith(SQLITE_PREFIX):
+        return
+    path = Path(url[len(SQLITE_PREFIX) :])
+    if str(path.parent) not in (".", ""):
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+
+_ensure_sqlite_directory(settings.database_url)
+
+engine = create_engine(settings.database_url, connect_args={"check_same_thread": False})
 
 
 class ConsentRecord(SQLModel, table=True):

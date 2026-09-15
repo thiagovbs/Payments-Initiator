@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from .config import settings
+from .errors import register_error_handlers
 from .initiator import CoreBankingService
 from .store import (
     ConsentRecord,
@@ -18,7 +19,6 @@ from .store import (
     get_by_consent_id,
     get_by_payment_id,
     get_by_request_id,
-    get_device_by_enrollment_id,
     init_db,
     upsert_consent,
     upsert_device,
@@ -36,6 +36,10 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(
     title="Payment Initiator (Open Finance)", version="0.2.0", lifespan=lifespan
 )
+
+# Erros vindos do core-banking chegam ao cliente com o motivo original, em vez
+# de virarem um 500 opaco.
+register_error_handlers(app)
 
 
 class PaymentInitiationRequest(BaseModel):

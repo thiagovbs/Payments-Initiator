@@ -10,9 +10,11 @@ services:
     environment:
       PORT: "8100"
     volumes:
-      # Persiste o banco SQLite (consentimentos e dispositivos vinculados).
-      # O engine cria o arquivo initiator.db no diretório de trabalho (/app).
-      - initiator-data:/app
+      # Persiste apenas os dados (consentimentos e dispositivos vinculados).
+      # Montar o volume em /app sombreava o codigo e o virtualenv da imagem: a
+      # partir da segunda subida o container rodava a versao antiga, porque o
+      # volume ja existia e tinha precedencia sobre o conteudo da imagem.
+      - initiator-data:/app/data
     ports:
       - "3200:8100"
     networks:

@@ -16,6 +16,9 @@ RUN uv sync --frozen --no-dev
 # Código da aplicação
 COPY app ./app
 
+# Diretório dos dados, montado como volume no compose
+RUN mkdir -p /app/data
+
 EXPOSE 8100
 
 CMD ["uv", "run", "--frozen", "--no-dev", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8100"]

@@ -44,6 +44,7 @@ cp .env.example .env
 | `CALLBACK_URL` | URL pública desta iniciadora para receber o redirect da detentora | `http://localhost:8100/callback` |
 | `ORGANISATION_ID` | Organização (produção) | — |
 | `AUTHORISATION_SERVER_ID` | Servidor de autorização (produção) | — |
+| `DATABASE_URL` | Banco local (SQLite). O diretório é criado automaticamente | `sqlite:///./data/initiator.db` |
 | `PORT` | Porta do servidor FastAPI | `8100` |
 
 ## Instalação e execução
@@ -71,6 +72,17 @@ A API sobe em `http://localhost:8100`.
 - OpenAPI JSON: `http://localhost:8100/openapi.json`
 
 > Obs.: a iniciadora cria o arquivo `initiator.db` (SQLite) no diretório de trabalho para persistir consentimentos e dispositivos.
+
+
+## Testes
+
+```bash
+uv run --group dev pytest
+```
+
+Entre eles, um vetor fixo que trava a paridade da assinatura FIDO com a
+Detentora: o mesmo HMAC é calculado nos dois repositórios, e mudar o formato da
+mensagem em apenas um dos lados quebraria a jornada JSR em runtime.
 
 ## Comunicação com o core-banking
 
