@@ -116,6 +116,10 @@ def create_jsr_payment(req: JsrPaymentRequest):
     # 1. Cria o consentimento JSR (contrato do core: jsConsentSchema)
     consent_data = _service.create_js_consent(
         {
+            # O enrollment e a ancora: a Detentora tira conta e titular dele.
+            # O accountId vai junto apenas para ser conferido -- divergencia e
+            # recusada com 400, em vez de debitar outra conta em silencio.
+            "enrollmentId": device.enrollment_id,
             "accountId": device.account_id,
             "amount": req.amount,
             "description": f"PIX to {req.creditor_name}",
@@ -142,7 +146,7 @@ def create_jsr_payment(req: JsrPaymentRequest):
 
     # 2. Autoriza o consentimento com a credencial FIDO do dispositivo
     _service.authorise_js_consent(
-        consent_id, device.credential_id, consent_data.get("fido_challenge")
+        consent_id, device.credential_id, consent_data.get("fido_challenge", "")
     )
 
     # 3. Inicia o pagamento JSR

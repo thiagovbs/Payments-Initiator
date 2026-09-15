@@ -9,6 +9,7 @@ import urllib.parse
 
 import httpx
 
+from .assertion import sign_fido_assertion
 from .config import settings
 
 
@@ -253,12 +254,25 @@ class CoreBankingService:
         }
 
     def authorise_js_consent(
-        self, consent_id: str, credential_id: str, challenge: str | None = None
+        self, consent_id: str, credential_id: str, challenge: str
     ) -> None:
+        """Autoriza o consentimento provando posse da credencial.
+
+        A Detentora exige os três campos: o challenge deixou de ser opcional e a
+        assinatura amarra a autorização a este consentimento e a esta
+        credencial. Ver ``assertion.py`` para o que ela prova.
+        """
+        if not challenge:
+            raise ValueError("challenge é obrigatório para autorizar o consentimento")
+
         url = self._js_path(f"/open-banking/itp/v2/consents/{consent_id}/authorise")
-        body = {"credentialId": credential_id}
-        if challenge:
-            body["challenge"] = challenge
+        body = {
+            "credentialId": credential_id,
+            "challenge": challenge,
+            "signature": sign_fido_assertion(
+                settings.initiator_client_secret, consent_id, credential_id, challenge
+            ),
+        }
         headers = {**self._initiator_headers(), "x-bcb-nfc": "true"}
         with httpx.Client(timeout=30.0) as client:
             resp = client.post(url, json=body, headers=headers)
