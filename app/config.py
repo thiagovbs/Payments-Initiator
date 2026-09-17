@@ -17,6 +17,13 @@ class Settings(BaseSettings):
 
     callback_url: str = "http://localhost:8100/callback"
 
+    # Allow-list de destinos para onde o /callback pode redirecionar o navegador
+    # do titular ao fim do enrollment (o redirect_uri que o lojista informa em
+    # POST /enrollments). Lista de origens separadas por vírgula, ex.:
+    # "https://sebo-frontend.vercel.app,http://localhost:5173". Vazio = nenhum
+    # redirect ao cliente é permitido (o /callback mantém a resposta JSON).
+    enrollment_redirect_allowlist: str = ""
+
     organisation_id: str = ""
     authorisation_server_id: str = ""
 

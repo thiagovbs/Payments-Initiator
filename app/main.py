@@ -4,9 +4,10 @@ import base64
 import json
 import uuid
 from contextlib import asynccontextmanager
+from urllib.parse import urlencode, urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from .auth import current_user, seed_users
@@ -211,6 +212,13 @@ class EnrollmentRequest(BaseModel):
         "Se vazio, usa o usuário autenticado nesta Iniciadora.",
     )
     account_number: str = Field("", description="Conta de débito do titular (opcional)")
+    redirect_uri: str = Field(
+        "",
+        description="Para onde o /callback deve redirecionar o navegador do "
+        "titular ao concluir o enrollment (permite ao lojista personalizar a "
+        "volta da jornada). Precisa estar na allow-list da Iniciadora; vazio "
+        "mantém a resposta JSON.",
+    )
 
 
 @app.post("/enrollments", status_code=201)
@@ -218,6 +226,15 @@ def create_enrollment(
     req: EnrollmentRequest, user: UserRecord = Depends(current_user)
 ) -> dict:
     """Inicia o cadastro de um dispositivo (JSR/ITP) na detentora."""
+    # Destino de volta da jornada (opcional). O core sempre redireciona para o
+    # /callback DESTA Iniciadora; o redirect_uri é o salto seguinte, de volta ao
+    # lojista, e por isso precisa estar na allow-list (evita open redirect).
+    if req.redirect_uri and not _redirect_uri_allowed(req.redirect_uri):
+        raise HTTPException(
+            status_code=400,
+            detail="redirect_uri não permitido (fora da allow-list da Iniciadora)",
+        )
+
     enrollment = _service.create_js_enrollment(settings.callback_url)
     auth = _service.create_auth_request(settings.callback_url)
 
@@ -232,6 +249,7 @@ def create_enrollment(
                 "kind": "enrollment",
                 "username": req.username or user.full_name or user.username,
                 "account_number": req.account_number,
+                "client_redirect_uri": req.redirect_uri,
             }
         ),
     )
@@ -284,11 +302,48 @@ def _decode_jwt_claims(token: str) -> dict:
         return {}
 
 
-@app.get("/callback")
+def _redirect_uri_allowed(uri: str) -> bool:
+    """Diz se o ``uri`` está na allow-list de redirect do enrollment.
+
+    Compara **origem** (esquema + host[:porta]), não prefixo de string, para não
+    cair em truques do tipo ``https://evil.com/https://lojista``. Allow-list
+    vazia = nada é permitido (o /callback fica só no JSON).
+    """
+    allow = settings.enrollment_redirect_allowlist
+    if not allow:
+        return False
+    parts = urlsplit(uri)
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        return False
+    origin = f"{parts.scheme}://{parts.netloc}"
+    allowed = set()
+    for entry in allow.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        p = urlsplit(entry)
+        allowed.add(f"{p.scheme}://{p.netloc}" if p.scheme and p.netloc else entry)
+    return origin in allowed
+
+
+def _client_redirect(redirect_uri: str, params: dict) -> RedirectResponse:
+    """Redireciona o navegador do titular de volta ao lojista, com o resultado.
+
+    Usa 303 para virar um GET na volta, e preserva a query que o lojista já
+    tenha posto no ``redirect_uri``.
+    """
+    query = urlencode({k: v for k, v in params.items() if v})
+    if query:
+        sep = "&" if urlsplit(redirect_uri).query else "?"
+        redirect_uri = f"{redirect_uri}{sep}{query}"
+    return RedirectResponse(redirect_uri, status_code=303)
+
+
+@app.get("/callback", response_model=None)
 def callback(
     code: str = Query(...),
     state: str = Query(...),
-) -> dict:
+) -> object:
     """Recebe o redirect de volta do core e completa o fluxo em curso.
 
     - ``kind=enrollment``: conclui o cadastro do dispositivo (JSR/ITP).
@@ -316,6 +371,25 @@ def callback(
 
     # -- Fluxo JSR/ITP: conclusão do cadastro do dispositivo ----------------
     if payload.get("kind") == "enrollment":
+        client_redirect = payload.get("client_redirect_uri")
+        if client_redirect:
+            # Personaliza a volta da jornada: conclui o cadastro e devolve o
+            # navegador ao lojista (com o resultado na query), em vez de exibir
+            # JSON cru na Iniciadora.
+            try:
+                result = _complete_enrollment(record, payload, jwt)
+            except HTTPException as exc:
+                return _client_redirect(
+                    client_redirect,
+                    {"status": "error", "detail": str(exc.detail)},
+                )
+            return _client_redirect(
+                client_redirect,
+                {
+                    "status": result.get("status", "DEVICE_REGISTERED"),
+                    "enrollment_id": result.get("enrollment_id", ""),
+                },
+            )
         return _complete_enrollment(record, payload, jwt)
 
     # -- Fluxo de pagamento com redirect (original) --------------------------
