@@ -1,0 +1,618 @@
+  openapi: "3.0.3"
+  info:
+    title: "Minimal Iniciadora"
+    description: "API exposta pela Iniciadora (PISP) e intermediada pelo Sensedia APIM. Expõe os endpoints nativos da iniciadora — iniciação de pagamento com redirect (PISP v5) e jornadas JSR (cadastro de dispositivo + pagamento sem redirect) — além dos paths formais Open Finance de autenticação, contas e consentimentos.\nJornada JSR:\n  - POST /enrollments inicia o cadastro do dispositivo (ITP).\n  - GET /callback recebe o redirect da detentora e conclui o cadastro\n    (gera credential_id e vincula a conta).\n  - POST /payments/jsr inicia um pagamento PIX sem redirect usando o\n    dispositivo vinculado (exige device REGISTERED; caso contrário\n    retorna need_enrollment com o login_url).\nAutenticação:\n  - POST /auth/login troca usuário e senha pré-cadastrados por um JWT.\n  - As demais rotas exigem Authorization: Bearer <token>, exceto\n    GET /callback, que é aberta pelo navegador do titular vindo da\n    detentora e é amarrada pelo state do fluxo.\n  - Cada usuário só enxerga os próprios pagamentos e dispositivos."
+    version: "1.2.0"
+  servers:
+    -
+      url: "https://api-assets.sensedia.com/minimal-iniciadora/v1"
+      description: "Produção"
+  tags:
+    -
+      name: "Auth"
+      description: "Autenticação dos usuários da Iniciadora"
+    -
+      name: "JSR"
+      description: "Jornada JSR (ITP enrollment + pagamento sem redirect)"
+    -
+      name: "PISP"
+      description: "Iniciação de Pagamento"
+  security:
+    -
+      bearerAuth: []
+  paths:
+    /auth/login:
+      post:
+        tags:
+          - "Auth"
+        summary: "Troca usuário e senha pré-cadastrados por um access token JWT"
+        description: "Usuário inexistente e senha errada devolvem a mesma resposta 401, para não revelar quais usuários existem."
+        operationId: "login"
+        security: []
+        parameters: []
+        requestBody:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginRequest"
+          required: true
+        responses:
+          200:
+            description: "Token emitido"
+            content:
+              application/json:
+                schema:
+                  $ref: "#/components/schemas/TokenResponse"
+          401:
+            $ref: "#/components/responses/Unauthorized"
+          422:
+            $ref: "#/components/responses/UnprocessableEntity"
+        x-api-broken: false
+        x-interceptors: {}
+        x-resource-name: "/auth/login"
+    /auth/me:
+      get:
+        tags:
+          - "Auth"
+        summary: "Devolve o usuário do token, para conferir se ele ainda vale"
+        operationId: "me"
+        parameters: []
+        responses:
+          200:
+            description: "Usuário autenticado"
+            content:
+              application/json:
+                schema:
+                  $ref: "#/components/schemas/MeResponse"
+          401:
+            $ref: "#/components/responses/Unauthorized"
+        x-api-broken: false
+        x-interceptors: {}
+        x-resource-name: "/auth/me"
+    /callback:
+      get:
+        tags:
+          - "JSR"
+        summary: "Completa o cadastro do dispositivo (kind=enrollment) ou o pagamento com redirect. Para enrollment, retorna credential_id e account_id."
+        description: "Completa o cadastro do dispositivo (kind=enrollment) ou o pagamento com redirect. Para enrollment, retorna credential_id e account_id."
+        operationId: "handleCallback"
+        security: []
+        parameters:
+          -
+            name: "code"
+            in: "query"
+            required: true
+            style: "form"
+            explode: true
+            schema:
+              type: "string"
+          -
+            name: "state"
+            in: "query"
+            required: true
+            style: "form"
+            explode: true
+            schema:
+              type: "string"
+        responses:
+          200:
+            description: "Fluxo concluído (resultado varia conforme o tipo)"
+            content:
+              application/json:
+                schema:
+                  $ref: "#/components/schemas/CallbackResponse"
+          400:
+            $ref: "#/components/responses/BadRequest"
+          404:
+            $ref: "#/components/responses/NotFound"
+          502:
+            $ref: "#/components/responses/CoreUnavailable"
+        x-api-broken: false
+        x-interceptors: {}
+        x-resource-name: "/callback"
+    /payments/{identifier}:
+      get:
+        tags:
+          - "PISP"
+        summary: "Consulta o status de um pagamento por payment_id ou consent_id"
+        operationId: "getPaymentDetail"
+        parameters:
+          -
+            name: "identifier"
+            in: "path"
+            required: true
+            style: "simple"
+            explode: false
+            schema:
+              type: "string"
+        responses:
+          200:
+            description: "Detalhes do pagamento"
+            content:
+              application/json:
+                schema:
+                  $ref: "#/components/schemas/PaymentDetailResponse"
+          401:
+            $ref: "#/components/responses/Unauthorized"
+          404:
+            $ref: "#/components/responses/NotFound"
+        x-api-broken: false
+        x-interceptors: {}
+        x-resource-name: "/payments/{identifier}"
+    /enrollments:
+      get:
+        tags:
+          - "JSR"
+        summary: "Lista os dispositivos vinculados do usuário autenticado"
+        description: "É por aqui que se recupera o enrollment_id exigido no pagamento JSR."
+        operationId: "listEnrollments"
+        parameters: []
+        responses:
+          200:
+            description: "Dispositivos do usuário"
+            content:
+              application/json:
+                schema:
+                  type: "array"
+                  items:
+                    $ref: "#/components/schemas/DeviceSummary"
+          401:
+            $ref: "#/components/responses/Unauthorized"
+        x-api-broken: false
+        x-interceptors: {}
+        x-resource-name: "/enrollments"
+      post:
+        tags:
+          - "JSR"
+        summary: "Inicia o cadastro de um dispositivo (JSR/ITP) na detentora"
+        operationId: "createEnrollment"
+        parameters: []
+        requestBody:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnrollmentRequest"
+          required: true
+        responses:
+          201:
+            description: "Cadastro iniciado; abra login_url para autenticar na detentora"
+            content:
+              application/json:
+                schema:
+                  $ref: "#/components/schemas/EnrollmentCreatedResponse"
+          401:
+            $ref: "#/components/responses/Unauthorized"
+          400:
+            $ref: "#/components/responses/BadRequest"
+          422:
+            $ref: "#/components/responses/UnprocessableEntity"
+          500:
+            $ref: "#/components/responses/InternalServerError"
+          502:
+            $ref: "#/components/responses/CoreUnavailable"
+        x-api-broken: false
+        x-interceptors: {}
+        x-resource-name: "/enrollments"
+    /payments:
+      post:
+        tags:
+          - "PISP"
+        summary: "Inicia um pagamento PIX com redirect na detentora"
+        operationId: "createPayment"
+        parameters: []
+        requestBody:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentInitiationRequest"
+          required: true
+        responses:
+          201:
+            description: "Pagamento iniciado; abra login_url para autenticar"
+            content:
+              application/json:
+                schema:
+                  $ref: "#/components/schemas/PaymentStartedResponse"
+          401:
+            $ref: "#/components/responses/Unauthorized"
+          400:
+            $ref: "#/components/responses/BadRequest"
+          422:
+            $ref: "#/components/responses/UnprocessableEntity"
+          500:
+            $ref: "#/components/responses/InternalServerError"
+          502:
+            $ref: "#/components/responses/CoreUnavailable"
+        x-api-broken: false
+        x-interceptors: {}
+        x-resource-name: "/payments"
+    /payments/jsr:
+      post:
+        tags:
+          - "JSR"
+        summary: "Pagamento PIX sem redirect com o dispositivo indicado em enrollment_id. Dispositivo inexistente devolve 404 e dispositivo fora de REGISTERED devolve 409, ambos com need_enrollment=true e o login_url para cadastro."
+        description: "Pagamento PIX sem redirect com o dispositivo indicado em enrollment_id. Dispositivo inexistente devolve 404 e dispositivo fora de REGISTERED devolve 409, ambos com need_enrollment=true e o login_url para cadastro."
+        operationId: "createJsrPayment"
+        parameters: []
+        requestBody:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JsrPaymentRequest"
+          required: true
+        responses:
+          201:
+            description: "Pagamento iniciado"
+            content:
+              application/json:
+                schema:
+                  $ref: "#/components/schemas/JsrPaymentResponse"
+          400:
+            description: "Erro repassado pelo core-banking, por exemplo ENROLLMENT_ACCOUNT_MISMATCH quando o accountId do enrollment não confere."
+            content:
+              application/json:
+                schema:
+                  $ref: "#/components/schemas/CoreError"
+          401:
+            $ref: "#/components/responses/Unauthorized"
+          404:
+            description: "Dispositivo não encontrado (ou pertence a outro usuário) — cadastro necessário"
+            content:
+              application/json:
+                schema:
+                  $ref: "#/components/schemas/NeedEnrollmentResponse"
+          409:
+            description: "Dispositivo existe mas não está REGISTERED — cadastro precisa ser concluído"
+            content:
+              application/json:
+                schema:
+                  $ref: "#/components/schemas/NeedEnrollmentResponse"
+          422:
+            $ref: "#/components/responses/UnprocessableEntity"
+          500:
+            $ref: "#/components/responses/InternalServerError"
+          502:
+            $ref: "#/components/responses/CoreUnavailable"
+        x-api-broken: false
+        x-interceptors: {}
+        x-resource-name: "/payments/jsr"
+  components:
+    securitySchemes:
+      bearerAuth:
+        type: "http"
+        scheme: "bearer"
+        bearerFormat: "JWT"
+        description: "Token devolvido por POST /auth/login"
+    schemas:
+      LoginRequest:
+        required:
+          - "password"
+          - "username"
+        type: "object"
+        properties:
+          username:
+            type: "string"
+            description: "Usuário pré-cadastrado na Iniciadora"
+          password:
+            type: "string"
+            format: "password"
+            description: "Senha do usuário"
+      TokenResponse:
+        type: "object"
+        properties:
+          access_token:
+            type: "string"
+          token_type:
+            type: "string"
+            example: "bearer"
+          expires_in:
+            type: "integer"
+            description: "Validade do token, em segundos"
+          expires_at:
+            type: "string"
+            format: "date-time"
+          username:
+            type: "string"
+      MeResponse:
+        type: "object"
+        properties:
+          username:
+            type: "string"
+          full_name:
+            type: "string"
+      DeviceSummary:
+        type: "object"
+        properties:
+          enrollment_id:
+            type: "string"
+          credential_id:
+            type: "string"
+          username:
+            type: "string"
+          account_id:
+            type: "string"
+          status:
+            type: "string"
+            description: "PENDING ou REGISTERED"
+      EnrollmentRequest:
+        type: "object"
+        properties:
+          username:
+            type: "string"
+            description: "Nome do titular a vincular na detentora (JSR/ITP). Se vazio, usa o usuário autenticado nesta Iniciadora."
+          account_number:
+            type: "string"
+            description: "Conta de débito do titular (opcional)"
+      EnrollmentCreatedResponse:
+        type: "object"
+        properties:
+          enrollment_id:
+            type: "string"
+          request_id:
+            type: "string"
+          login_url:
+            type: "string"
+          message:
+            type: "string"
+      CallbackResponse:
+        type: "object"
+        properties:
+          enrollment_id:
+            type: "string"
+          credential_id:
+            type: "string"
+          account_id:
+            type: "string"
+          payment_id:
+            type: "string"
+          consent_id:
+            type: "string"
+          status:
+            type: "string"
+        description: "Resultado do callback. Para enrollment: enrollment_id, credential_id, account_id, status. Para pagamento: payment_id, consent_id, status.\n"
+      JsrPaymentRequest:
+        required:
+          - "amount"
+          - "creditor_cpf_cnpj"
+          - "creditor_key"
+          - "creditor_name"
+          - "enrollment_id"
+        type: "object"
+        properties:
+          enrollment_id:
+            type: "string"
+            description: "Dispositivo vinculado que autoriza o pagamento e define de qual conta ele sai. Devolvido por POST /enrollments e pelo GET /callback do cadastro."
+          amount:
+            type: "string"
+            description: "Valor em BRL, ex: '100.00'"
+          currency:
+            type: "string"
+            default: "BRL"
+          creditor_name:
+            type: "string"
+          creditor_cpf_cnpj:
+            type: "string"
+          creditor_key:
+            required:
+              - "type"
+              - "value"
+            type: "object"
+            properties:
+              type:
+                type: "string"
+                enum:
+                  - "CPF"
+                  - "CNPJ"
+                  - "EMAIL"
+                  - "PHONE"
+                  - "EVP"
+              value:
+                type: "string"
+            description: "{type, value} da chave PIX do credor"
+      JsrPaymentResponse:
+        type: "object"
+        properties:
+          payment_id:
+            type: "string"
+          consent_id:
+            type: "string"
+          status:
+            type: "string"
+      NeedEnrollmentResponse:
+        type: "object"
+        properties:
+          need_enrollment:
+            type: "boolean"
+            example: true
+          login_url:
+            type: "string"
+          message:
+            type: "string"
+      PaymentInitiationRequest:
+        required:
+          - "amount"
+          - "creditor_cpf_cnpj"
+          - "creditor_key"
+          - "creditor_name"
+        type: "object"
+        properties:
+          amount:
+            type: "string"
+            description: "Valor em BRL, ex: '100.00'"
+          currency:
+            type: "string"
+            default: "BRL"
+          creditor_name:
+            type: "string"
+          creditor_cpf_cnpj:
+            type: "string"
+          creditor_key:
+            required:
+              - "type"
+              - "value"
+            type: "object"
+            properties:
+              type:
+                type: "string"
+                enum:
+                  - "CPF"
+                  - "CNPJ"
+                  - "EMAIL"
+                  - "PHONE"
+                  - "EVP"
+              value:
+                type: "string"
+            description: "{type, value} da chave PIX do credor"
+          account_id:
+            type: "string"
+            description: "Override da conta de débito"
+            nullable: true
+      PaymentStartedResponse:
+        type: "object"
+        properties:
+          request_id:
+            type: "string"
+          login_url:
+            type: "string"
+          message:
+            type: "string"
+      CoreError:
+        type: "object"
+        description: "Falha em uma chamada ao core-banking. Quando o core responde 4xx, o status e o motivo originais são repassados; 5xx e indisponibilidade viram 502."
+        properties:
+          error:
+            type: "string"
+            description: "Código do core (ex.: INSUFFICIENT_BALANCE, ENROLLMENT_ACCOUNT_MISMATCH) ou CORE_REQUEST_FAILED / CORE_UNREACHABLE quando não há código."
+            example: "INSUFFICIENT_BALANCE"
+          message:
+            type: "string"
+          core:
+            type: "object"
+            properties:
+              status:
+                type: "integer"
+                description: "Status HTTP devolvido pelo core. Ausente quando o core não respondeu."
+                example: 422
+              url:
+                type: "string"
+                nullable: true
+      ValidationError:
+        type: "object"
+        description: "Corpo da requisição inválido, recusado pela validação antes de qualquer chamada ao core."
+        properties:
+          detail:
+            type: "array"
+            items:
+              type: "object"
+              properties:
+                loc:
+                  type: "array"
+                  items:
+                    type: "string"
+                msg:
+                  type: "string"
+                type:
+                  type: "string"
+      HttpError:
+        type: "object"
+        description: "Erro gerado pela própria Iniciadora."
+        properties:
+          detail:
+            type: "string"
+      PaymentDetailResponse:
+        type: "object"
+        properties:
+          consent_id:
+            type: "string"
+          request_id:
+            type: "string"
+          status:
+            type: "string"
+          payment_id:
+            type: "string"
+            nullable: true
+          created_at:
+            type: "string"
+            format: "date-time"
+    responses:
+      BadRequest:
+        description: "Requisição inválida"
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HttpError"
+      Unauthorized:
+        description: "Não autenticado"
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HttpError"
+      NotFound:
+        description: "Não encontrado"
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HttpError"
+      InternalServerError:
+        description: "Erro interno"
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HttpError"
+      UnprocessableEntity:
+        description: "Corpo da requisição inválido"
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ValidationError"
+      CoreUnavailable:
+        description: "O core-banking respondeu 5xx ou não respondeu (timeout, DNS, conexão recusada)"
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CoreError"
+  x-destination: "http://34.200.109.21:3200"
+  x-interceptors:
+    1:
+      x-interceptor-position: 0
+      x-interceptor-type: "LOG"
+      x-interceptor-content: "{\"acceptedTerms\":true,\"ignoreBodyValidationMultiPartFormData\":false}"
+      x-interceptor-execution-point: "FIRST"
+      x-interceptor-status: "REFERENCE"
+    2:
+      x-interceptor-position: 0
+      x-interceptor-type: "LOG"
+      x-interceptor-content: "{\"acceptedTerms\":true,\"ignoreBodyValidationMultiPartFormData\":false}"
+      x-interceptor-execution-point: "SECOND"
+      x-interceptor-status: "REFERENCE"
+  x-life-cycle: "Stage One"
+  x-resources:
+    /auth/login:
+      x-resource-description: "Autenticação dos usuários da Iniciadora"
+      x-interceptors: {}
+      x-api-broken: false
+    /auth/me:
+      x-resource-description: "Autenticação dos usuários da Iniciadora"
+      x-interceptors: {}
+      x-api-broken: false
+    /payments:
+      x-resource-description: "Iniciação de Pagamento"
+      x-interceptors: {}
+      x-api-broken: false
+    /callback:
+      x-resource-description: "Jornada JSR (ITP enrollment + pagamento sem redirect)"
+      x-interceptors: {}
+      x-api-broken: false
+    /payments/{identifier}:
+      x-resource-description: "Iniciação de Pagamento"
+      x-interceptors: {}
+      x-api-broken: false
+    /enrollments:
+      x-resource-description: "Jornada JSR (ITP enrollment + pagamento sem redirect)"
+      x-interceptors: {}
+      x-api-broken: false
+    /payments/jsr:
+      x-resource-description: "Jornada JSR (ITP enrollment + pagamento sem redirect)"
+      x-interceptors: {}
+      x-api-broken: false
+  x-api-broken: false

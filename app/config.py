@@ -26,6 +26,18 @@ class Settings(BaseSettings):
 
     port: int = 8100
 
+    # Autenticação dos usuários desta Iniciadora (JWT emitido em /auth/login).
+    # Sem JWT_SECRET no ambiente a aplicação sobe com um segredo de
+    # desenvolvimento e avisa no log: qualquer um que conheça o valor padrão
+    # forjaria tokens válidos, então em produção ele é obrigatório.
+    jwt_secret: str = "dev-insecure-jwt-secret-change-me"
+    jwt_algorithm: str = "HS256"
+    jwt_expires_minutes: int = 60
+
+    # Usuários pré-cadastrados, semeados no start. Aceita
+    # "alice:senha,bruno:outra" ou um JSON [{"username":..,"password":..}].
+    initiator_users: str = ""
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

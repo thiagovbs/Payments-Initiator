@@ -5,21 +5,25 @@ import json
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from .auth import current_user, seed_users
+from .auth import router as auth_router
 from .config import settings
 from .errors import register_error_handlers
 from .initiator import CoreBankingService
 from .store import (
     ConsentRecord,
     DeviceRecord,
+    UserRecord,
     get_by_consent_id,
     get_by_payment_id,
     get_by_request_id,
     get_device_by_enrollment_id,
     init_db,
+    list_devices,
     upsert_consent,
     upsert_device,
 )
@@ -30,12 +34,20 @@ _service = CoreBankingService()
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
+    # Os usuários pré-cadastrados vêm do ambiente e são regravados a cada
+    # start, para que trocar uma senha em INITIATOR_USERS passe a valer.
+    seed_users()
     yield
 
 
 app = FastAPI(
-    title="Payment Initiator (Open Finance)", version="0.2.0", lifespan=lifespan
+    title="Payment Initiator (Open Finance)", version="0.3.0", lifespan=lifespan
 )
+
+# Login e consulta do próprio usuário. Todas as demais rotas exigem o JWT que
+# esta rota emite — exceto /callback, que é aberta pelo navegador do titular
+# vindo da detentora e não tem como carregar o header Authorization.
+app.include_router(auth_router)
 
 # Erros vindos do core-banking chegam ao cliente com o motivo original, em vez
 # de virarem um 500 opaco.
@@ -52,7 +64,9 @@ class PaymentInitiationRequest(BaseModel):
 
 
 @app.post("/payments", status_code=201)
-def create_payment(req: PaymentInitiationRequest) -> dict:
+def create_payment(
+    req: PaymentInitiationRequest, user: UserRecord = Depends(current_user)
+) -> dict:
     """Inicia um pagamento: cria o auth request no core e devolve o login_url."""
     auth = _service.create_auth_request(settings.callback_url)
 
@@ -66,6 +80,7 @@ def create_payment(req: PaymentInitiationRequest) -> dict:
     }
 
     record = ConsentRecord(
+        owner=user.username,
         consent_id=auth["request_id"],  # provisório; atualizado no callback
         request_id=auth["request_id"],
         status="AWAITING_AUTH",
@@ -94,14 +109,20 @@ class JsrPaymentRequest(BaseModel):
 
 
 @app.post("/payments/jsr", status_code=201, response_model=None)
-def create_jsr_payment(req: JsrPaymentRequest):
+def create_jsr_payment(
+    req: JsrPaymentRequest, user: UserRecord = Depends(current_user)
+):
     """Inicia um pagamento JSR (sem redirect) com o dispositivo informado.
 
     O ``enrollment_id`` é obrigatório e identifica de quem é o pagamento. Antes,
     usava-se o dispositivo REGISTERED mais recente, sem escopo de titular: com
     mais de um titular cadastrado, o pagamento de um saía da conta do outro.
+
+    A busca é restrita aos dispositivos do usuário autenticado: um
+    ``enrollment_id`` de outro titular responde como inexistente, em vez de
+    debitar a conta dele.
     """
-    device = get_device_by_enrollment_id(req.enrollment_id)
+    device = get_device_by_enrollment_id(req.enrollment_id, user.username)
     if not device or device.status != "REGISTERED":
         auth = _service.create_auth_request(settings.callback_url)
         return JSONResponse(
@@ -167,6 +188,7 @@ def create_jsr_payment(req: JsrPaymentRequest):
     payment = _service.initiate_js_payment(consent_id)
 
     record = ConsentRecord(
+        owner=user.username,
         consent_id=consent_id,
         request_id=str(uuid.uuid4()),
         status="COMPLETED",
@@ -183,25 +205,32 @@ def create_jsr_payment(req: JsrPaymentRequest):
 
 
 class EnrollmentRequest(BaseModel):
-    username: str = Field(..., description="Nome do titular a vincular (JSR/ITP)")
+    username: str = Field(
+        "",
+        description="Nome do titular a vincular na detentora (JSR/ITP). "
+        "Se vazio, usa o usuário autenticado nesta Iniciadora.",
+    )
     account_number: str = Field("", description="Conta de débito do titular (opcional)")
 
 
 @app.post("/enrollments", status_code=201)
-def create_enrollment(req: EnrollmentRequest) -> dict:
+def create_enrollment(
+    req: EnrollmentRequest, user: UserRecord = Depends(current_user)
+) -> dict:
     """Inicia o cadastro de um dispositivo (JSR/ITP) na detentora."""
     enrollment = _service.create_js_enrollment(settings.callback_url)
     auth = _service.create_auth_request(settings.callback_url)
 
     enrollment_id = enrollment.get("enrollment_id", "")
     record = ConsentRecord(
+        owner=user.username,
         consent_id=enrollment_id,
         request_id=auth["request_id"],
         status="ENROLLMENT_PENDING",
         payload=json.dumps(
             {
                 "kind": "enrollment",
-                "username": req.username,
+                "username": req.username or user.full_name or user.username,
                 "account_number": req.account_number,
             }
         ),
@@ -214,6 +243,33 @@ def create_enrollment(req: EnrollmentRequest) -> dict:
         "login_url": auth["login_url"],
         "message": "Cadastre o dispositivo abrindo login_url na detentora.",
     }
+
+
+class DeviceSummary(BaseModel):
+    enrollment_id: str
+    credential_id: str
+    username: str
+    account_id: str
+    status: str
+
+
+@app.get("/enrollments", response_model=list[DeviceSummary])
+def list_enrollments(user: UserRecord = Depends(current_user)) -> list[DeviceSummary]:
+    """Lista os dispositivos vinculados do usuário autenticado.
+
+    É por aqui que se recupera o ``enrollment_id`` exigido no pagamento JSR,
+    sem precisar guardar a resposta do cadastro.
+    """
+    return [
+        DeviceSummary(
+            enrollment_id=device.enrollment_id,
+            credential_id=device.credential_id,
+            username=device.username,
+            account_id=device.account_id,
+            status=device.status,
+        )
+        for device in list_devices(user.username)
+    ]
 
 
 def _decode_jwt_claims(token: str) -> dict:
@@ -237,6 +293,12 @@ def callback(
 
     - ``kind=enrollment``: conclui o cadastro do dispositivo (JSR/ITP).
     - senão: fluxo de pagamento com redirect (comportamento original).
+
+    Esta é a única rota sem JWT: quem a chama é o navegador do titular, vindo
+    da detentora, e um redirect não carrega o header ``Authorization``. O que
+    a amarra a um usuário é o ``state`` — o ``request_id`` que só existe no
+    registro criado por uma chamada já autenticada, e de onde sai o dono do
+    dispositivo/pagamento resultante.
     """
     record = get_by_request_id(state) or get_by_consent_id(state)
     if not record:
@@ -351,8 +413,10 @@ def _complete_enrollment(record: ConsentRecord, payload: dict, jwt: str) -> dict
     accounts = _service.list_accounts(jwt)
     account_id = accounts[0]["id"] if accounts else ""
 
-    # 6. Persiste o dispositivo como REGISTERED
+    # 6. Persiste o dispositivo como REGISTERED, sob o usuário que pediu o
+    # cadastro (o dono do ConsentRecord), que é quem poderá pagar com ele.
     device = DeviceRecord(
+        owner=record.owner,
         enrollment_id=enrollment_id,
         credential_id=credential_id,
         username=username,
@@ -374,9 +438,15 @@ def _complete_enrollment(record: ConsentRecord, payload: dict, jwt: str) -> dict
 
 
 @app.get("/payments/{identifier}")
-def get_payment(identifier: str) -> dict:
-    """Consulta o status de um pagamento por payment_id ou consent_id."""
-    record = get_by_payment_id(identifier) or get_by_consent_id(identifier)
+def get_payment(identifier: str, user: UserRecord = Depends(current_user)) -> dict:
+    """Consulta o status de um pagamento por payment_id ou consent_id.
+
+    Só enxerga os pagamentos do próprio usuário: o identificador de outro
+    titular responde 404, sem revelar que ele existe.
+    """
+    record = get_by_payment_id(identifier, user.username) or get_by_consent_id(
+        identifier, user.username
+    )
     if not record:
         raise HTTPException(status_code=404, detail="Pagamento não encontrado")
 
