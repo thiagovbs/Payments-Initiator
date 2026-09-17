@@ -170,6 +170,21 @@ class CoreBankingService:
             headers["x-initiator-key"] = settings.initiator_client_secret
         return headers
 
+    def revoke_js_enrollment(self, enrollment_id: str) -> bool:
+        """Best-effort: pede à detentora para revogar o enrollment (JSR/ITP).
+
+        Nem toda detentora expõe DELETE do enrollment, então não propaga erro —
+        a fonte que impede novos pagamentos é a revogação local (o vínculo
+        guardado na Iniciadora). Devolve True se a detentora aceitou.
+        """
+        url = self._js_path(f"/open-banking/itp/v2/enrollments/{enrollment_id}")
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                resp = client.delete(url, headers=self._initiator_headers())
+            return resp.status_code < 400
+        except httpx.HTTPError:
+            return False
+
     def create_js_enrollment(self, redirect_uri: str) -> dict:
         url = self._js_path("/open-banking/itp/v2/enrollments")
         body = {"redirect_uri": redirect_uri}

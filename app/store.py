@@ -215,6 +215,25 @@ def list_devices(owner: str) -> list[DeviceRecord]:
         )
 
 
+def delete_device_by_enrollment_id(enrollment_id: str, owner: str) -> bool:
+    """Remove o dispositivo do ``owner`` por ``enrollment_id``. Devolve se achou.
+
+    Escopado ao dono para ninguém revogar o enrollment de outro titular.
+    """
+    with Session(engine) as session:
+        device = session.exec(
+            select(DeviceRecord).where(
+                DeviceRecord.enrollment_id == enrollment_id,
+                DeviceRecord.owner == owner,
+            )
+        ).first()
+        if not device:
+            return False
+        session.delete(device)
+        session.commit()
+        return True
+
+
 # ---------------------------------------------------------------------------
 # Usuários da Iniciadora
 # ---------------------------------------------------------------------------

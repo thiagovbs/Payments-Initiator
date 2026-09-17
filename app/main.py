@@ -19,6 +19,7 @@ from .store import (
     ConsentRecord,
     DeviceRecord,
     UserRecord,
+    delete_device_by_enrollment_id,
     get_by_consent_id,
     get_by_payment_id,
     get_by_request_id,
@@ -288,6 +289,23 @@ def list_enrollments(user: UserRecord = Depends(current_user)) -> list[DeviceSum
         )
         for device in list_devices(user.username)
     ]
+
+
+@app.delete("/enrollments/{enrollment_id}")
+def revoke_enrollment(
+    enrollment_id: str, user: UserRecord = Depends(current_user)
+) -> dict:
+    """Revoga um dispositivo (enrollment JSR) do usuário autenticado.
+
+    Remove o vínculo guardado nesta Iniciadora — o que impede novos pagamentos
+    JSR com ele — e pede, best-effort, a revogação na detentora. Escopado ao
+    dono (o lojista), para ninguém revogar enrollment de outro.
+    """
+    removed = delete_device_by_enrollment_id(enrollment_id, user.username)
+    if not removed:
+        raise HTTPException(status_code=404, detail="Enrollment não encontrado")
+    core_revoked = _service.revoke_js_enrollment(enrollment_id)
+    return {"revoked": True, "core_revoked": core_revoked}
 
 
 def _decode_jwt_claims(token: str) -> dict:
