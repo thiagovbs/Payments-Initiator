@@ -17,6 +17,20 @@ class Settings(BaseSettings):
 
     callback_url: str = "http://localhost:8100/callback"
 
+    # Endereço desta Iniciadora onde a detentora avisa mudanças de status do
+    # consentimento. É o que fecha a jornada quando o titular aprova e fecha o
+    # navegador sem voltar pelo /callback.
+    #
+    # O padrão é vazio de propósito, e não um localhost plausível: a URL precisa
+    # estar na allow-list da detentora (WEBHOOK_ALLOWED_ORIGINS), e enviar uma
+    # que ela não aceita faz a **criação do consentimento** falhar com 400 — ou
+    # seja, um default errado derrubaria a jornada inteira em vez de só deixar
+    # de avisar. Vazio = a detentora não é instruída a avisar, e a notícia chega
+    # pela reconciliação do GET /payments/{identifier}.
+    #
+    # Use a mesma origem do CALLBACK_URL, com o caminho /webhooks/consents.
+    webhook_url: str = ""
+
     # Allow-list de destinos para onde o /callback pode redirecionar o navegador
     # do titular ao fim do enrollment (o redirect_uri que o lojista informa em
     # POST /enrollments). Lista de origens separadas por vírgula, ex.:

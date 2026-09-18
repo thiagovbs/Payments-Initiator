@@ -1,12 +1,17 @@
 """API da Iniciadora de Pagamento (fluxo OAuth/redirect + jornadas JSR)."""
 
+import asyncio
 import base64
+import hashlib
+import hmac
 import json
 import uuid
 from contextlib import asynccontextmanager
+from typing import Annotated
 from urllib.parse import urlencode, urlsplit
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+import httpx
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
@@ -62,15 +67,41 @@ class PaymentInitiationRequest(BaseModel):
     creditor_name: str
     creditor_cpf_cnpj: str
     creditor_key: dict = Field(..., description="{type, value} da chave PIX do credor")
-    account_id: str | None = Field(None, description="Override da conta de débito")
+    debtor_cpf: str = Field(
+        "",
+        description="CPF do pagador, quando conhecido. Informado, só esse "
+        "titular consegue aprovar o consentimento na detentora.",
+    )
+    redirect_uri: str = Field(
+        "",
+        description="Para onde o /callback deve redirecionar o navegador do "
+        "titular depois da aprovação (permite ao lojista personalizar a volta "
+        "da jornada). Precisa estar na allow-list; vazio mantém a resposta JSON.",
+    )
 
 
 @app.post("/payments", status_code=201)
 def create_payment(
     req: PaymentInitiationRequest, user: UserRecord = Depends(current_user)
 ) -> dict:
-    """Inicia um pagamento: cria o auth request no core e devolve o login_url."""
-    auth = _service.create_auth_request(settings.callback_url)
+    """Inicia um pagamento com redirecionamento: cria o **consentimento** e
+    devolve a URL onde o titular o aprova.
+
+    A ordem importa e mudou. Antes, o titular só fazia login na detentora e o
+    consentimento era criado já autorizado no /callback, depois dele: a pessoa
+    autenticava sem nunca ver valor nem credor, e o dinheiro saía. Agora o
+    consentimento nasce ``AWAITING_AUTHORISATION`` **antes** do redirect, e a
+    ``authorisation_url`` é uma tela que mostra o que está sendo pago e pede
+    confirmação. Sem essa confirmação a detentora recusa a submissão.
+
+    A conta de débito não é mais escolhida aqui: quem escolhe é o titular, na
+    tela, entre as contas dele.
+    """
+    if req.redirect_uri and not _redirect_uri_allowed(req.redirect_uri):
+        raise HTTPException(
+            status_code=400,
+            detail="redirect_uri não permitido (fora da allow-list da Iniciadora)",
+        )
 
     payload = {
         "amount": req.amount,
@@ -78,22 +109,40 @@ def create_payment(
         "creditor_name": req.creditor_name,
         "creditor_cpf_cnpj": req.creditor_cpf_cnpj,
         "creditor_key": req.creditor_key,
-        "account_id": req.account_id,
+        "kind": "redirect_payment",
+        "client_redirect_uri": req.redirect_uri,
     }
+
+    consent = _service.create_aspsp_consent(
+        {
+            **payload,
+            "description": f"PIX to {req.creditor_name}",
+            "debtor_cpf": req.debtor_cpf,
+            # A detentora devolve o navegador para cá com o desfecho, e é aqui
+            # que o pagamento é submetido.
+            "redirect_uri": settings.callback_url,
+            # ...e avisa por aqui mesmo que o navegador não volte.
+            "webhook_uri": settings.webhook_url,
+        }
+    )
 
     record = ConsentRecord(
         owner=user.username,
-        consent_id=auth["request_id"],  # provisório; atualizado no callback
-        request_id=auth["request_id"],
-        status="AWAITING_AUTH",
+        consent_id=consent["consent_id"],
+        request_id=str(uuid.uuid4()),
+        status=consent.get("status", "AWAITING_AUTHORISATION"),
         payload=json.dumps(payload),
     )
     upsert_consent(record)
 
     return {
-        "request_id": auth["request_id"],
-        "login_url": auth["login_url"],
-        "message": "Abra login_url no navegador para autenticar na detentora.",
+        "consent_id": consent["consent_id"],
+        "status": record.status,
+        "authorisation_url": consent["authorisation_url"],
+        "message": (
+            "Abra authorisation_url no navegador: o titular revisa o valor e o "
+            "credor e aprova. O pagamento só é submetido depois disso."
+        ),
     }
 
 
@@ -359,20 +408,40 @@ def _client_redirect(redirect_uri: str, params: dict) -> RedirectResponse:
 
 @app.get("/callback", response_model=None)
 def callback(
-    code: str = Query(...),
-    state: str = Query(...),
+    # Annotated + default None (em vez de ``= Query(None)``) para que o default
+    # real seja None: com ``Query(None)`` o objeto de metadados vaza como valor
+    # quando a funcao e chamada direto, e todo parametro ausente vira verdadeiro.
+    code: Annotated[str | None, Query()] = None,
+    state: Annotated[str | None, Query()] = None,
+    consentId: Annotated[str | None, Query()] = None,
+    status: Annotated[str | None, Query()] = None,
 ) -> object:
-    """Recebe o redirect de volta do core e completa o fluxo em curso.
+    """Recebe o redirect de volta da detentora e completa o fluxo em curso.
 
-    - ``kind=enrollment``: conclui o cadastro do dispositivo (JSR/ITP).
-    - senão: fluxo de pagamento com redirect (comportamento original).
+    Dois formatos, um por jornada:
+
+    - ``consentId`` + ``status``: pagamento com redirecionamento. A detentora
+      já mostrou valor e credor ao titular e traz aqui o que ele decidiu. Em
+      ``AUTHORISED`` o pagamento é submetido; em ``REJECTED`` nada é debitado.
+    - ``code`` + ``state``: cadastro de dispositivo (JSR/ITP), que continua
+      passando pelo login OAuth.
 
     Esta é a única rota sem JWT: quem a chama é o navegador do titular, vindo
-    da detentora, e um redirect não carrega o header ``Authorization``. O que
-    a amarra a um usuário é o ``state`` — o ``request_id`` que só existe no
-    registro criado por uma chamada já autenticada, e de onde sai o dono do
-    dispositivo/pagamento resultante.
+    da detentora, e um redirect não carrega o header ``Authorization``. O que a
+    amarra a um usuário é o identificador na query — ``consentId`` ou ``state``
+    só existem em registros criados por uma chamada já autenticada, e é de lá
+    que sai o dono do pagamento/dispositivo resultante.
     """
+    # -- Fluxo de pagamento com redirecionamento ---------------------------
+    if consentId:
+        return _complete_redirect_payment(consentId, status)
+
+    if not code or not state:
+        raise HTTPException(
+            status_code=400,
+            detail="Callback sem identificação: informe consentId ou code+state",
+        )
+
     record = get_by_request_id(state) or get_by_consent_id(state)
     if not record:
         raise HTTPException(
@@ -384,63 +453,106 @@ def callback(
     except json.JSONDecodeError:
         payload = {}
 
+    if payload.get("kind") != "enrollment":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Pagamento com redirecionamento agora volta com consentId e "
+                "status, não com code e state"
+            ),
+        )
+
     # 1. Trocar code por JWT
     jwt = _service.exchange_code(code)
 
     # -- Fluxo JSR/ITP: conclusão do cadastro do dispositivo ----------------
-    if payload.get("kind") == "enrollment":
-        client_redirect = payload.get("client_redirect_uri")
-        if client_redirect:
-            # Personaliza a volta da jornada: conclui o cadastro e devolve o
-            # navegador ao lojista (com o resultado na query), em vez de exibir
-            # JSON cru na Iniciadora.
-            try:
-                result = _complete_enrollment(record, payload, jwt)
-            except HTTPException as exc:
-                return _client_redirect(
-                    client_redirect,
-                    {"status": "error", "detail": str(exc.detail)},
-                )
+    client_redirect = payload.get("client_redirect_uri")
+    if client_redirect:
+        # Personaliza a volta da jornada: conclui o cadastro e devolve o
+        # navegador ao lojista (com o resultado na query), em vez de exibir
+        # JSON cru na Iniciadora.
+        try:
+            result = _complete_enrollment(record, payload, jwt)
+        except HTTPException as exc:
             return _client_redirect(
                 client_redirect,
-                {
-                    "status": result.get("status", "DEVICE_REGISTERED"),
-                    "enrollment_id": result.get("enrollment_id", ""),
-                },
+                {"status": "error", "detail": str(exc.detail)},
             )
-        return _complete_enrollment(record, payload, jwt)
+        return _client_redirect(
+            client_redirect,
+            {
+                "status": result.get("status", "DEVICE_REGISTERED"),
+                "enrollment_id": result.get("enrollment_id", ""),
+            },
+        )
+    return _complete_enrollment(record, payload, jwt)
 
-    # -- Fluxo de pagamento com redirect (original) --------------------------
 
-    # 2. Resolver a conta de débito (override ou primeira conta do usuário)
-    account_id = payload.get("account_id")
-    if not account_id:
-        accounts = _service.list_accounts(jwt)
-        if not accounts:
-            raise HTTPException(status_code=400, detail="Usuário não possui contas")
-        account_id = accounts[0]["id"]
+# Estados em que o pagamento já foi (ou está sendo) submetido: não se submete
+# de novo. A detentora também barraria, mas errar aqui evita a ida à rede.
+_TERMINAL_STATUSES = {"PAYMENT_SUBMITTED", "COMPLETED", "REJECTED"}
 
-    # 3. Criar o consentimento ASPSP
-    consent_id = _service.create_aspsp_consent(
-        jwt,
-        {
-            "account_id": account_id,
-            "amount": payload["amount"],
-            "creditor_name": payload["creditor_name"],
-            "creditor_cpf_cnpj": payload.get("creditor_cpf_cnpj"),
-            "creditor_key": payload["creditor_key"],
-            "description": "Pagamento via Open Finance",
-        },
-    )
 
-    # 4. Submeter o pagamento
-    payment = _service.submit_aspsp_payment(jwt, consent_id)
+def _submit_and_record(record: ConsentRecord) -> dict:
+    """Submete o pagamento na detentora e grava o desfecho no registro local.
 
-    record.consent_id = consent_id
+    Chamado de dois lugares — o /callback e o webhook — que podem disparar quase
+    ao mesmo tempo. Não há trava aqui de propósito: a detentora resolve a
+    corrida na transição atômica AUTHORISED -> PAYMENT_SUBMITTED, e quem chega
+    depois recebe 409 em vez de um segundo débito.
+    """
+    payment = _service.submit_aspsp_payment(record.consent_id)
     record.status = "COMPLETED"
-    record.code = code
     record.payment_id = payment.get("payment_id")
     upsert_consent(record)
+    return payment
+
+
+def _complete_redirect_payment(consent_id: str, status: str | None) -> object:
+    """Conclui um pagamento depois que o titular decidiu na tela da detentora.
+
+    A Iniciadora não decide nada aqui: ela repassa a decisão. Em ``REJECTED``
+    nem tenta submeter; em ``AUTHORISED`` submete, e é a detentora que confere
+    de novo o estado do consentimento antes de mover o dinheiro — se alguém
+    chamar este callback com um status inventado, a submissão falha lá.
+    """
+    record = get_by_consent_id(consent_id)
+    if not record:
+        raise HTTPException(
+            status_code=404, detail="Requisição de pagamento não encontrada"
+        )
+
+    try:
+        payload = json.loads(record.payload or "{}")
+    except json.JSONDecodeError:
+        payload = {}
+    client_redirect = payload.get("client_redirect_uri")
+
+    if (status or "").upper() == "REJECTED":
+        record.status = "REJECTED"
+        upsert_consent(record)
+        result = {
+            "consent_id": consent_id,
+            "status": "REJECTED",
+            "message": "O titular recusou o pagamento. Nada foi debitado.",
+        }
+        if client_redirect:
+            return _client_redirect(
+                client_redirect, {"status": "REJECTED", "consent_id": consent_id}
+            )
+        return result
+
+    payment = _submit_and_record(record)
+
+    if client_redirect:
+        return _client_redirect(
+            client_redirect,
+            {
+                "status": "COMPLETED",
+                "consent_id": consent_id,
+                "payment_id": payment.get("payment_id", ""),
+            },
+        )
 
     return {
         "payment_id": payment.get("payment_id"),
@@ -529,9 +641,85 @@ def _complete_enrollment(record: ConsentRecord, payload: dict, jwt: str) -> dict
     }
 
 
+def verify_webhook_signature(raw_body: bytes, signature: str | None) -> bool:
+    """Confere a assinatura HMAC que a detentora põe em ``x-webhook-signature``.
+
+    Sem isso, quem descobrisse esta URL postaria ``status: AUTHORISED`` e a
+    Iniciadora submeteria um pagamento que o titular nunca aprovou — ela age em
+    cima do aviso. A chave é o mesmo segredo que já autentica a Iniciadora na
+    detentora, então os dois lados a conhecem sem configuração nova.
+    """
+    if not signature:
+        return False
+    expected = hmac.new(
+        settings.initiator_client_secret.encode("utf-8"), raw_body, hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(expected, signature)
+
+
+@app.post("/webhooks/consents")
+async def consent_webhook(request: Request) -> dict:
+    """Recebe da detentora a mudança de status de um consentimento.
+
+    É o que fecha a jornada quando o titular aprova e fecha o navegador sem
+    voltar pelo /callback: o aviso chega por aqui e o pagamento é submetido do
+    mesmo jeito. Sem JWT — quem chama é a detentora, autenticada pela assinatura
+    do corpo.
+    """
+    raw_body = await request.body()
+    if not verify_webhook_signature(raw_body, request.headers.get("x-webhook-signature")):
+        raise HTTPException(status_code=401, detail="Assinatura do webhook inválida")
+
+    try:
+        event = json.loads(raw_body or b"{}")
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Corpo do webhook não é JSON")
+
+    consent_id = event.get("consentId") or ""
+    record = get_by_consent_id(consent_id)
+    if not record:
+        # 200 de propósito: um consentimento que não é nosso não é erro da
+        # detentora, e devolver 4xx só a faria tentar de novo à toa.
+        return {"received": True, "known": False}
+
+    status = (event.get("status") or "").upper()
+    already_done = record.status in _TERMINAL_STATUSES
+
+    if status == "AUTHORISED" and not already_done:
+        try:
+            # Em thread separada porque submeter é uma chamada HTTP bloqueante:
+            # dentro de um endpoint async ela travaria o event loop inteiro
+            # enquanto a detentora responde -- e a detentora chama este webhook
+            # no meio de operações que a própria Iniciadora está aguardando.
+            payment = await asyncio.to_thread(_submit_and_record, record)
+            return {"received": True, "status": "COMPLETED", "payment_id": payment.get("payment_id")}
+        except httpx.HTTPStatusError as exc:
+            # 409 aqui normalmente significa que o /callback chegou primeiro e já
+            # submeteu — não é falha, é corrida resolvida. Os demais erros ficam
+            # registrados no status para o lojista ver.
+            if exc.response.status_code != 409:
+                record.status = "SUBMISSION_FAILED"
+                upsert_consent(record)
+            return {"received": True, "status": record.status}
+
+    if status and status != record.status and not already_done:
+        record.status = status
+        upsert_consent(record)
+
+    return {"received": True, "status": record.status}
+
+
 @app.get("/payments/{identifier}")
 def get_payment(identifier: str, user: UserRecord = Depends(current_user)) -> dict:
     """Consulta o status de um pagamento por payment_id ou consent_id.
+
+    O estado vem da **detentora**, não da cópia local: o registro daqui só sabe
+    o que passou por esta aplicação, e as duas visões divergem em silêncio
+    sempre que o titular aprova e não volta pelo /callback. A consulta
+    reconcilia e persiste o que o core respondeu.
+
+    Se o core não responder, devolve a cópia local marcada como tal — um lojista
+    com resposta velha e avisado disso é melhor que um 502.
 
     Só enxerga os pagamentos do próprio usuário: o identificador de outro
     titular responde 404, sem revelar que ele existe.
@@ -542,10 +730,43 @@ def get_payment(identifier: str, user: UserRecord = Depends(current_user)) -> di
     if not record:
         raise HTTPException(status_code=404, detail="Pagamento não encontrado")
 
+    source = "core"
+    try:
+        consent = _service.get_aspsp_consent(record.consent_id)
+    except httpx.HTTPError:
+        consent = {}
+        source = "local"
+
+    core_status = consent.get("status")
+    if core_status and (
+        core_status != record.status or consent.get("paymentId") != record.payment_id
+    ):
+        record.status = core_status
+        record.payment_id = consent.get("paymentId") or record.payment_id
+        upsert_consent(record)
+
     return {
         "consent_id": record.consent_id,
         "request_id": record.request_id,
         "status": record.status,
         "payment_id": record.payment_id,
         "created_at": record.created_at.isoformat(),
+        "source": source,
+        "consent": consent or None,
     }
+
+
+@app.get("/payments/{identifier}/events")
+def get_payment_events(
+    identifier: str, user: UserRecord = Depends(current_user)
+) -> dict:
+    """Trilha do consentimento na detentora: o que foi tentado, por quem, e o
+    que passou. Inclui as tentativas recusadas, que não deixam marca no status.
+    """
+    record = get_by_payment_id(identifier, user.username) or get_by_consent_id(
+        identifier, user.username
+    )
+    if not record:
+        raise HTTPException(status_code=404, detail="Pagamento não encontrado")
+
+    return _service.get_aspsp_consent_events(record.consent_id)

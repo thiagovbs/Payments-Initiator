@@ -7,7 +7,7 @@ Aplicação **Iniciadora de Pagamento (PISP)** Open Finance Brasil construída e
 ## Funcionalidades
 
 - **Multiusuário com JWT**: login com usuário e senha pré-cadastrados (`POST /auth/login`) e token `Bearer` obrigatório nas demais rotas; cada usuário só enxerga os próprios pagamentos e dispositivos.
-- **Pagamento com redirect (PISP v5)**: cria consentimento, autentica o usuário na detentora via OAuth e efetua o PIX.
+- **Pagamento com redirect (PISP v5)**: cria o consentimento na detentora, leva o titular à tela onde ele revisa valor e credor e aprova, e só então submete o PIX.
 - **Jornada JSR**: cadastro de dispositivo (ITP enrollment + FIDO2) e pagamento PIX **sem redirect**.
 - **Persistência local** (SQLite via SQLModel) de usuários, consentimentos e dispositivos vinculados.
 - **Erros do core repassados**: a recusa da detentora (`INSUFFICIENT_BALANCE`, `PIX_KEY_NOT_FOUND`, `ENROLLMENT_ACCOUNT_MISMATCH`) chega ao cliente com o motivo original, em vez de virar um 500 opaco.
@@ -43,6 +43,7 @@ cp .env.example .env
 | `INITIATOR_CLIENT_SECRET` | Secret da iniciadora; **deve igualar `INITIATOR_SERVICE_SECRET` do core** (header `x-initiator-key` e assinatura da asserção FIDO) | — |
 | `CORE_BASE_URL` | URL do core-banking (chamada direta) | `http://localhost:3000` |
 | `CALLBACK_URL` | URL pública desta iniciadora para receber o redirect da detentora | `http://localhost:8100/callback` |
+| `WEBHOOK_URL` | URL pública onde a detentora avisa mudanças de status do consentimento — mesma origem do `CALLBACK_URL`, com `/webhooks/consents`. A origem precisa estar em `WEBHOOK_ALLOWED_ORIGINS` no core, senão a criação do consentimento falha com 400. Vazio = sem aviso, só reconciliação | vazio (desligado) |
 | `ORGANISATION_ID` | Organização (produção) | — |
 | `AUTHORISATION_SERVER_ID` | Servidor de autorização (produção) | — |
 | `DATABASE_URL` | Banco local (SQLite). O diretório é criado automaticamente | `sqlite:///./data/initiator.db` |
@@ -153,8 +154,10 @@ Todas as rotas exigem `Authorization: Bearer <token>`, exceto `POST /auth/login`
 |---|---|---|
 | POST | `/auth/login` | Troca usuário e senha por um access token JWT |
 | GET | `/auth/me` | Devolve o usuário do token (confere se ele ainda vale) |
-| POST | `/payments` | Inicia pagamento PIX com redirect na detentora |
-| GET | `/payments/{identifier}` | Consulta status de um pagamento do próprio usuário (por `payment_id` ou `consent_id`) |
+| POST | `/payments` | Cria o consentimento do pagamento e devolve a URL onde o titular o aprova |
+| GET | `/payments/{identifier}` | Consulta status de um pagamento do próprio usuário (por `payment_id` ou `consent_id`), **reconciliado com a detentora** |
+| GET | `/payments/{identifier}/events` | Trilha do consentimento na detentora, incluindo tentativas recusadas |
+| POST | `/webhooks/consents` | Recebe da detentora a mudança de status (sem JWT; autenticado por assinatura HMAC) |
 | POST | `/enrollments` | Inicia o cadastro de dispositivo (JSR/ITP) na detentora |
 | GET | `/enrollments` | Lista os dispositivos vinculados do usuário (de onde sai o `enrollment_id`) |
 | GET | `/callback` | Recebe o redirect da detentora e conclui o fluxo (enrollment ou pagamento) |
@@ -172,13 +175,15 @@ Em ambas, o passo zero é o mesmo: `POST /auth/login` e o token no header
 
 ### 1. Pagamento com redirect (PISP v5)
 
-1. `POST /payments` → retorna `request_id` + `login_url`.
+O consentimento vem **antes** do redirect, e o titular aprova vendo o que vai
+pagar. Sem essa aprovação a detentora recusa a submissão — não há caminho que
+debite.
+
+1. `POST /payments` → cria o consentimento na detentora e retorna `consent_id` +
+   `authorisation_url`. O consentimento nasce `AWAITING_AUTHORISATION`.
 
    ```bash
-   curl -s -X POST http://localhost:8100/payments \
-     -H "Authorization: Bearer $TOKEN" \
-     -H 'Content-Type: application/json' \
-     -d '{
+   curl -s -X POST http://localhost:8100/payments      -H "Authorization: Bearer $TOKEN"      -H 'Content-Type: application/json'      -d '{
        "amount": "25.00",
        "creditor_name": "Beneficiario",
        "creditor_cpf_cnpj": "01688166360",
@@ -186,14 +191,42 @@ Em ambas, o passo zero é o mesmo: `POST /auth/login` e o token no header
      }'
    ```
 
-   `account_id` é opcional: sem ele, o callback usa a primeira conta do usuário autenticado **na detentora**.
+   `debtor_cpf` é opcional: informado, só aquele titular consegue aprovar.
+   `redirect_uri` (opcional, na allow-list) devolve o navegador ao lojista no
+   fim, em vez de exibir JSON.
 
-2. Abra `login_url`; o usuário autentica na detentora.
-3. A detentora redireciona para `CALLBACK_URL?code=...&state=...`.
-4. `GET /callback` troca o `code` por JWT da detentora, resolve a conta, cria o consentimento ASPSP e submete o pagamento.
+2. Abra `authorisation_url`. O titular se autentica na detentora, **vê valor,
+   credor e chave PIX**, escolhe de qual das contas dele sai o dinheiro e
+   confirma — ou recusa.
+3. A detentora redireciona para `CALLBACK_URL?consentId=...&status=AUTHORISED`
+   (ou `status=REJECTED`).
+4. `GET /callback` submete o pagamento **somente** em `AUTHORISED`. A detentora
+   reconfere o estado do consentimento antes de mover o dinheiro, então um
+   `status` forjado na query não paga nada.
 5. Retorna `payment_id`, `consent_id`, `status`.
 
-> Dois tokens diferentes convivem aqui: o **JWT desta Iniciadora** (quem é o usuário no `Authorization`) e o **JWT da detentora** (obtido no callback, usado nas chamadas ao core). Um não substitui o outro.
+> A conta de débito não é mais escolhida pela Iniciadora: quem escolhe é o
+> titular, na tela de aprovação, entre as contas dele.
+
+#### Se o navegador não voltar
+
+O passo 3 depende de o titular voltar para a loja — e ele pode aprovar e fechar
+a aba. Duas saídas, as duas já ligadas:
+
+- **A detentora avisa.** `WEBHOOK_URL` é enviada na criação do consentimento, e
+  a detentora faz `POST` nela a cada mudança de status. Em `AUTHORISED` a
+  Iniciadora submete o pagamento pelo webhook, do mesmo jeito que faria pelo
+  `/callback`. O corpo vem assinado em `x-webhook-signature` (HMAC-SHA256 com o
+  `INITIATOR_CLIENT_SECRET`): sem isso, quem descobrisse a URL postaria
+  `AUTHORISED` e a Iniciadora pagaria algo que o titular nunca aprovou.
+- **A Iniciadora pergunta.** `GET /payments/{identifier}` consulta a detentora,
+  reconcilia o registro local e devolve `source: "core"`. Se o core não
+  responder, devolve a cópia local com `source: "local"` em vez de 502.
+
+Webhook e `/callback` podem disparar quase ao mesmo tempo. Não há trava aqui de
+propósito: a detentora resolve a corrida na transição atômica
+`AUTHORISED -> PAYMENT_SUBMITTED`, e quem chega depois recebe `409` em vez de um
+segundo débito.
 
 ### 2. Jornada JSR (pagamento sem redirect)
 

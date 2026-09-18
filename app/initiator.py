@@ -37,8 +37,8 @@ class CoreBankingService:
     def _payments_path(self) -> str:
         return f"{self.base_url}/v1/aspsp/payments"
 
-    def _payment_status_path(self, payment_id: str) -> str:
-        return f"{self.base_url}/v1/aspsp/payments/{payment_id}"
+    def _consent_path(self, consent_id: str) -> str:
+        return f"{self.base_url}/v1/aspsp/payments/consents/{consent_id}"
 
     def _js_path(self, suffix: str) -> str:
         # Os endpoints JSR (ITP + PISP) usam os paths /open-banking/... expostos
@@ -94,16 +94,27 @@ class CoreBankingService:
             return data
         return data.get("accounts", [])
 
-    # -- 4. ASPSP: criar consentimento --------------------------------------
+    # -- 4. ASPSP: criar consentimento (pendente de aprovacao) --------------
 
-    def create_aspsp_consent(self, jwt: str, payload: dict) -> str:
+    def create_aspsp_consent(self, payload: dict) -> dict:
+        """Cria o consentimento na Detentora e colhe a URL de aprovacao.
+
+        E a primeira coisa que acontece na jornada com redirecionamento: o
+        consentimento nasce ``AWAITING_AUTHORISATION``, sem titular e sem conta
+        -- nesta altura a Iniciadora nao sabe quem vai pagar. Quem preenche
+        esses dados e o proprio titular, na ``authorisation_url``.
+
+        Autentica com ``x-initiator-key``, e nao com JWT de usuario: a chamada e
+        de serviço para serviço, feita antes de existir qualquer sessao do
+        titular.
+        """
         url = self._consents_path()
         body = self._build_consent_body(payload)
         with httpx.Client(timeout=30.0) as client:
             resp = client.post(
                 url,
                 json=body,
-                headers={**self._headers(jwt), "x-idempotency-key": _uuid()},
+                headers={**self._initiator_headers(), "x-idempotency-key": _uuid()},
             )
             resp.raise_for_status()
         data = resp.json()
@@ -114,18 +125,31 @@ class CoreBankingService:
         )
         if not consent_id:
             raise RuntimeError("Resposta sem consent_id")
-        return consent_id
+        return {
+            "consent_id": consent_id,
+            "status": data.get("status", "AWAITING_AUTHORISATION"),
+            "authorisation_url": (
+                data.get("authorisationUrl")
+                or data.get("links", {}).get("redirect", "")
+            ),
+        }
 
     # -- 5. ASPSP: submeter o pagamento -------------------------------------
 
-    def submit_aspsp_payment(self, jwt: str, consent_id: str) -> dict:
+    def submit_aspsp_payment(self, consent_id: str) -> dict:
+        """Submete o pagamento de um consentimento ja aprovado.
+
+        A Detentora recusa (409 ``CONSENT_NOT_AUTHORISED``) se o titular ainda
+        nao confirmou ou se recusou -- e essa recusa que garante que nenhum
+        pagamento sai sem aprovacao, independente do que a Iniciadora tente.
+        """
         url = self._payments_path()
         body = {"consentId": consent_id}
         with httpx.Client(timeout=30.0) as client:
             resp = client.post(
                 url,
                 json=body,
-                headers={**self._headers(jwt), "x-idempotency-key": _uuid()},
+                headers={**self._initiator_headers(), "x-idempotency-key": _uuid()},
             )
             resp.raise_for_status()
         data = resp.json()
@@ -135,21 +159,25 @@ class CoreBankingService:
             "status": data.get("status", ""),
         }
 
-    # -- 6. ASPSP: consultar status -----------------------------------------
+    # -- 6. ASPSP: consultar o consentimento --------------------------------
 
-    def get_aspsp_status(self, jwt: str, identifier: str) -> dict:
-        url = self._payment_status_path(identifier)
+    def get_aspsp_consent(self, consent_id: str) -> dict:
+        url = self._consent_path(consent_id)
         with httpx.Client(timeout=30.0) as client:
-            resp = client.get(url, headers=self._headers(jwt))
+            resp = client.get(url, headers=self._initiator_headers())
             resp.raise_for_status()
         return resp.json()
 
     # -- Montagem do payload de consentimento -------------------------------
 
     def _build_consent_body(self, payload: dict) -> dict:
-        """Monta o body do consentimento no formato do core-banking."""
-        return {
-            "accountId": payload["account_id"],
+        """Monta o body do consentimento no formato do core-banking.
+
+        Sem ``accountId``: a conta de debito e escolhida pelo titular na tela de
+        aprovacao. ``redirect_uri`` e para onde a Detentora devolve o navegador
+        com o desfecho.
+        """
+        body = {
             "amount": payload["amount"],
             "creditorName": payload["creditor_name"],
             "creditorDocument": payload.get("creditor_cpf_cnpj"),
@@ -158,7 +186,24 @@ class CoreBankingService:
                 "value": payload["creditor_key"]["value"],
             },
             "description": payload.get("description", "Pagamento via Open Finance"),
+            "redirect_uri": payload["redirect_uri"],
         }
+        if payload.get("debtor_cpf"):
+            body["debtorDocument"] = payload["debtor_cpf"]
+        if payload.get("webhook_uri"):
+            body["webhook_uri"] = payload["webhook_uri"]
+        return body
+
+    # -- 7. ASPSP: trilha de eventos do consentimento -----------------------
+
+    def get_aspsp_consent_events(self, consent_id: str) -> dict:
+        """Histórico do consentimento na detentora: o que foi tentado e o que
+        passou. Serve para auditar a jornada sem abrir o banco do core."""
+        url = f"{self._consent_path(consent_id)}/events"
+        with httpx.Client(timeout=30.0) as client:
+            resp = client.get(url, headers=self._initiator_headers())
+            resp.raise_for_status()
+        return resp.json()
 
     # ------------------------------------------------------------------
     # Jornada JSR (FIDO2 simplificado) — ITP enrollment + PISP JSR
