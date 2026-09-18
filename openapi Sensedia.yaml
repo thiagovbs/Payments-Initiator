@@ -2,7 +2,7 @@
   info:
     title: "Minimal Iniciadora"
     description: "API exposta pela Iniciadora (PISP) e intermediada pelo Sensedia APIM. Expõe os endpoints nativos da iniciadora — iniciação de pagamento com redirect (PISP v5) e jornadas JSR (cadastro de dispositivo + pagamento sem redirect) — além dos paths formais Open Finance de autenticação, contas e consentimentos.\nJornada JSR:\n  - POST /enrollments inicia o cadastro do dispositivo (ITP).\n  - GET /callback recebe o redirect da detentora e conclui o cadastro\n    (gera credential_id e vincula a conta).\n  - POST /payments/jsr inicia um pagamento PIX sem redirect usando o\n    dispositivo vinculado (exige device REGISTERED; caso contrário\n    retorna need_enrollment com o login_url).\nAutenticação:\n  - POST /auth/login troca usuário e senha pré-cadastrados por um JWT.\n  - As demais rotas exigem Authorization: Bearer <token>, exceto\n    GET /callback, que é aberta pelo navegador do titular vindo da\n    detentora e é amarrada pelo state do fluxo.\n  - Cada usuário só enxerga os próprios pagamentos e dispositivos."
-    version: "1.2.0"
+    version: "1.3.0"
   servers:
     -
       url: "https://api-assets.sensedia.com/minimal-iniciadora/v1"
@@ -21,6 +21,112 @@
     -
       bearerAuth: []
   paths:
+    /enrollments/{enrollment_id}:
+      delete:
+        tags:
+          - "JSR"
+        summary: "Revoga um dispositivo vinculado"
+        description: "Remove o vinculo guardado nesta Iniciadora, o que impede novos pagamentos JSR\ncom aquele dispositivo, e pede a revogacao tambem na detentora.\n\nA revogacao na detentora e best-effort: nem toda detentora expoe o DELETE do\nenrollment, e o que de fato impede o pagamento e a remocao local. O campo\ncore_revoked diz se ela aceitou.\n\nEscopado ao dono: um enrollment de outro usuario responde 404, para ninguem\nrevogar dispositivo alheio nem descobrir que ele existe.\n"
+        operationId: "revokeEnrollment"
+        parameters:
+          -
+            name: "enrollment_id"
+            in: "path"
+            description: "Dispositivo a revogar, entre os do usuario autenticado."
+            required: true
+            style: "simple"
+            explode: false
+            schema:
+              type: "string"
+        responses:
+          200:
+            description: "Dispositivo revogado"
+            content:
+              application/json:
+                schema:
+                  $ref: "#/components/schemas/EnrollmentRevokedResponse"
+          401:
+            $ref: "#/components/responses/Unauthorized"
+          404:
+            $ref: "#/components/responses/NotFound"
+        x-api-broken: false
+        x-interceptors: {}
+        x-resource-name: "/enrollments/{enrollment_id}"
+    /payments/{identifier}/events:
+      get:
+        tags:
+          - "PISP"
+        summary: "Trilha do consentimento na detentora"
+        description: "O que foi tentado, por quem, e o que passou -- inclusive as tentativas\nrecusadas, que nao mudam o status e por isso nao aparecem na consulta do\npagamento. Serve para auditar a jornada de ponta a ponta sem abrir o banco\nda detentora.\n"
+        operationId: "getPaymentEvents"
+        parameters:
+          -
+            name: "identifier"
+            in: "path"
+            description: "payment_id ou consent_id de um pagamento do proprio usuario."
+            required: true
+            style: "simple"
+            explode: false
+            schema:
+              type: "string"
+        responses:
+          200:
+            description: "Trilha do consentimento, em ordem cronologica"
+            content:
+              application/json:
+                schema:
+                  $ref: "#/components/schemas/PaymentEventsResponse"
+          401:
+            $ref: "#/components/responses/Unauthorized"
+          404:
+            $ref: "#/components/responses/NotFound"
+          502:
+            $ref: "#/components/responses/CoreUnavailable"
+        x-api-broken: false
+        x-interceptors: {}
+        x-resource-name: "/payments/{identifier}/events"
+    /webhooks/consents:
+      post:
+        tags:
+          - "PISP"
+        summary: "Recebe da detentora a mudanca de status de um consentimento"
+        description: "Fecha a jornada quando o titular aprova e fecha o navegador sem voltar pelo\n/callback: o aviso chega por aqui e o pagamento e submetido do mesmo jeito.\n\nNao usa JWT -- quem chama e a detentora. A autenticacao e a assinatura do\ncorpo em x-webhook-signature (HMAC-SHA256 do corpo cru, chave compartilhada\ncom a detentora). Sem conferir, quem descobrisse esta URL postaria AUTHORISED\ne a Iniciadora pagaria algo que o titular nunca aprovou.\n\nUm consentimento desconhecido responde 200 com known false, de proposito: 4xx\nso faria a detentora reenviar um aviso que nunca sera nosso.\n"
+        operationId: "receiveConsentWebhook"
+        security: []
+        parameters:
+          -
+            name: "x-webhook-signature"
+            in: "header"
+            description: "HMAC-SHA256 do corpo cru, em hexadecimal."
+            required: true
+            style: "simple"
+            explode: false
+            schema:
+              type: "string"
+        requestBody:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConsentWebhookEvent"
+          required: true
+        responses:
+          200:
+            description: "Aviso recebido"
+            content:
+              application/json:
+                schema:
+                  $ref: "#/components/schemas/ConsentWebhookAck"
+          400:
+            $ref: "#/components/responses/BadRequest"
+          401:
+            description: "Assinatura ausente ou invalida"
+            content:
+              application/json:
+                schema:
+                  $ref: "#/components/schemas/CoreError"
+        x-api-broken: false
+        x-interceptors: {}
+        x-resource-name: "/webhooks/consents"
     /auth/login:
       post:
         tags:
@@ -73,15 +179,38 @@
       get:
         tags:
           - "JSR"
-        summary: "Completa o cadastro do dispositivo (kind=enrollment) ou o pagamento com redirect. Para enrollment, retorna credential_id e account_id."
-        description: "Completa o cadastro do dispositivo (kind=enrollment) ou o pagamento com redirect. Para enrollment, retorna credential_id e account_id."
+        summary: "Recebe o redirect da detentora e completa a jornada em curso"
+        description: "Dois formatos, um por jornada:\n  - consentId + status: pagamento com redirecionamento. A detentora ja mostrou\n    valor e credor ao titular e traz aqui o que ele decidiu. Em AUTHORISED o\n    pagamento e submetido; em REJECTED nada e debitado.\n  - code + state: cadastro de dispositivo (JSR/ITP), que continua passando pelo\n    login OAuth. Devolve credential_id e account_id.\n\nUnica rota sem JWT: quem chama e o navegador do titular, e um redirect nao\ncarrega o header Authorization. O que a amarra a um usuario e o identificador\nna query, que so existe em registro criado por chamada ja autenticada.\n"
         operationId: "handleCallback"
         security: []
         parameters:
           -
+            name: "consentId"
+            in: "query"
+            description: "Jornada de pagamento: consentimento que o titular acabou de decidir."
+            required: false
+            style: "form"
+            explode: true
+            schema:
+              type: "string"
+              format: "uuid"
+          -
+            name: "status"
+            in: "query"
+            description: "Decisao do titular. Acompanha consentId."
+            required: false
+            style: "form"
+            explode: true
+            schema:
+              type: "string"
+              enum:
+                - "AUTHORISED"
+                - "REJECTED"
+          -
             name: "code"
             in: "query"
-            required: true
+            description: "Jornada de enrollment: authorization code devolvido pela detentora."
+            required: false
             style: "form"
             explode: true
             schema:
@@ -89,7 +218,8 @@
           -
             name: "state"
             in: "query"
-            required: true
+            description: "Jornada de enrollment: request_id que amarra o code ao pedido. Acompanha code."
+            required: false
             style: "form"
             explode: true
             schema:
@@ -197,7 +327,8 @@
       post:
         tags:
           - "PISP"
-        summary: "Inicia um pagamento PIX com redirect na detentora"
+        summary: "Cria o consentimento do pagamento e devolve a URL onde o titular o aprova"
+        description: "O consentimento nasce AWAITING_AUTHORISATION na detentora e nada e debitado\naqui. A authorisation_url e a tela onde o titular revisa valor e credor,\nescolhe a conta de debito e aprova -- sem isso a detentora recusa a\nsubmissao. A conta nao e escolhida pela Iniciadora.\n"
         operationId: "createPayment"
         parameters: []
         requestBody:
@@ -208,7 +339,7 @@
           required: true
         responses:
           201:
-            description: "Pagamento iniciado; abra login_url para autenticar"
+            description: "Consentimento criado; abra authorisation_url para o titular aprovar"
             content:
               application/json:
                 schema:
@@ -463,17 +594,26 @@
               value:
                 type: "string"
             description: "{type, value} da chave PIX do credor"
-          account_id:
+          debtor_cpf:
             type: "string"
-            description: "Override da conta de débito"
-            nullable: true
+            description: "CPF do pagador, quando conhecido. Informado, só esse titular consegue aprovar o consentimento na detentora."
+          redirect_uri:
+            type: "string"
+            format: "uri"
+            description: "Para onde o /callback deve redirecionar o navegador do titular depois da aprovação. Precisa estar na allow-list da Iniciadora; vazio mantém a resposta JSON."
       PaymentStartedResponse:
         type: "object"
         properties:
-          request_id:
+          consent_id:
             type: "string"
-          login_url:
+            format: "uuid"
+          status:
             type: "string"
+            example: "AWAITING_AUTHORISATION"
+          authorisation_url:
+            type: "string"
+            format: "uri"
+            description: "Tela onde o titular revisa valor e credor e aprova."
           message:
             type: "string"
       CoreError:
@@ -534,6 +674,108 @@
           created_at:
             type: "string"
             format: "date-time"
+          source:
+            type: "string"
+            enum:
+              - "core"
+              - "local"
+            description: "De onde veio o status. core = consultado e reconciliado com a detentora; local = a detentora não respondeu e esta é a cópia desta aplicação."
+          consent:
+            type: "object"
+            nullable: true
+            additionalProperties: true
+            description: "Consentimento como a detentora o devolveu. Nulo quando ela não respondeu."
+      PaymentEventsResponse:
+        type: "object"
+        properties:
+          consentId:
+            type: "string"
+            format: "uuid"
+          events:
+            type: "array"
+            items:
+              $ref: "#/components/schemas/PaymentConsentEvent"
+      PaymentConsentEvent:
+        type: "object"
+        properties:
+          event:
+            type: "string"
+            example: "CONSENT_AUTHORISED"
+          actor:
+            type: "string"
+            enum:
+              - "INITIATOR"
+              - "HOLDER"
+              - "SYSTEM"
+          actorUserId:
+            type: "string"
+            nullable: true
+          outcome:
+            type: "string"
+            enum:
+              - "ACCEPTED"
+              - "REFUSED"
+          reason:
+            type: "string"
+            nullable: true
+            description: "Código do erro quando o passo foi recusado."
+          statusBefore:
+            type: "string"
+            nullable: true
+          statusAfter:
+            type: "string"
+            nullable: true
+          detail:
+            type: "object"
+            nullable: true
+            additionalProperties: true
+          createdAt:
+            type: "string"
+            format: "date-time"
+      ConsentWebhookEvent:
+        type: "object"
+        properties:
+          consentId:
+            type: "string"
+            format: "uuid"
+          event:
+            type: "string"
+            example: "CONSENT_AUTHORISED"
+          status:
+            type: "string"
+            example: "AUTHORISED"
+          previousStatus:
+            type: "string"
+            nullable: true
+          paymentId:
+            type: "string"
+            nullable: true
+          timestamp:
+            type: "string"
+            format: "date-time"
+      EnrollmentRevokedResponse:
+        type: "object"
+        properties:
+          revoked:
+            type: "boolean"
+            description: "O vínculo foi removido nesta Iniciadora."
+          core_revoked:
+            type: "boolean"
+            description: "A detentora aceitou revogar o enrollment. False não impede a revogação local de valer."
+      ConsentWebhookAck:
+        type: "object"
+        properties:
+          received:
+            type: "boolean"
+          known:
+            type: "boolean"
+            description: "false quando o consentimento não é desta Iniciadora."
+          status:
+            type: "string"
+            description: "Status do registro local depois de processar o aviso."
+          payment_id:
+            type: "string"
+            nullable: true
     responses:
       BadRequest:
         description: "Requisição inválida"
@@ -587,6 +829,18 @@
       x-interceptor-status: "REFERENCE"
   x-life-cycle: "Stage One"
   x-resources:
+    /enrollments/{enrollment_id}:
+      x-resource-description: "Jornada JSR (ITP enrollment + pagamento sem redirect)"
+      x-interceptors: {}
+      x-api-broken: false
+    /payments/{identifier}/events:
+      x-resource-description: "Iniciação de Pagamento"
+      x-interceptors: {}
+      x-api-broken: false
+    /webhooks/consents:
+      x-resource-description: "Iniciação de Pagamento"
+      x-interceptors: {}
+      x-api-broken: false
     /auth/login:
       x-resource-description: "Autenticação dos usuários da Iniciadora"
       x-interceptors: {}
